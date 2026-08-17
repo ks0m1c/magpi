@@ -1,0 +1,1112 @@
+#+title: Magpi — An Actionable Control Porcelain for Emacs
+#+author: ks0m1c
+#+date: <2026-08-14 Fri>
+#+filetags: :pi:emacs:orchestration:design:
+#+startup: overview indent hidestars
+#+subtitle: Source notes; canonical design is [[file:MAGPI.org][MAGPI.org]]
+
+* Status
+:PROPERTIES:
+:ID: pi-workbench-status
+:TYPE: proposal
+:END:
+
+This proposal now records a governing architecture decision: *Magpi Workbench
+owns the agent process tree*. It spawns narrowly contextualized Pi RPC sessions,
+supervises them directly, and treats =pi-subagents= as prior art plus an optional
+compatibility backend—not as the runtime authority. The first gate is an
+OTP-inspired supervisor and fake RPC child, followed by one real exact-target
+steer loop.
+
+* North Star
+:PROPERTIES:
+:ID: pi-workbench-north-star
+:TYPE: vision
+:END:
+
+Pi Workbench should make it easy to answer, at a glance:
+
+1. What did I intend?
+2. What is Pi doing about it?
+3. What needs my attention?
+4. Where is the evidence?
+5. What exact intervention is safe here?
+
+Its promise is:
+
+#+begin_quote
+Show what the human intended, what Pi is doing about it, and what needs
+attention; permit exact, acknowledged intervention without confusing intent
+with process telemetry.
+#+end_quote
+
+The inspiration from Magit is not merely visual. Magit turns a textual status
+report into a control surface. Point supplies a precise noun, a key supplies a
+verb, and a transient makes the full command legible before execution. The
+Workbench should have the same quality: semantic rows are addressable,
+explainable, and—when the owning runtime advertises a valid capability—directly
+actionable.
+
+This is not a GUI dashboard embedded in Emacs. It is an intention-amplifying
+text interface: terse enough to scan, rich enough to inspect, and exact enough
+to intervene without composing a fresh chat prompt from memory.
+
+* Product Reframing
+:PROPERTIES:
+:ID: pi-workbench-reframing
+:TYPE: decision
+:END:
+
+The product is an *intent-and-attention control plane with several projections*,
+not one omniscient “tree of agents.”
+
+Agent orchestration does not naturally form one tree:
+
+- one mission can have several attempts;
+- one run attempt can have nested children;
+- a resumed child belongs to a new linked attempt;
+- a Pi session can own several missions;
+- decisions and artifacts outlive processes;
+- project mission records and a global mission index have different authority.
+
+A single meta-tree would hide these distinctions and make action routing
+ambiguous. The Workbench instead presents four projections over one normalized
+model:
+
+1. *Attention inbox* — what needs a human now, ordered by urgency.
+2. *Mission view* — intention → decisions → attempts → evidence.
+3. *Fleet view* — owning Pi sessions → active attempts → child topology.
+4. *Artifact/history view* — terminal attempts, outputs, patches, control receipts, and
+   recovery material.
+
+The attention and mission projections are the default. Fleet topology is a
+secondary diagnostic view.
+
+* Governing Principles
+:PROPERTIES:
+:ID: pi-workbench-principles
+:TYPE: decision
+:END:
+
+** Intention is authored, not inferred
+
+A mission objective, acceptance condition, explicit decision, or frozen send
+anchor may express intent. The current tool, last file touched, agent name, or
+model-generated summary does not.
+
+When intent is absent, render “intent unspecified.” Never quietly invent it.
+
+** Addressable before actionable
+
+Every semantic row must support inspection and explanation. A mutating action
+is offered only when:
+
+- the row has a stable target;
+- the owning Pi process is known;
+- the process advertises the capability;
+- the observed lifecycle state permits it;
+- the target is revalidated immediately before mutation.
+
+Aggregate counts and timestamps need not have arbitrary mutations merely to
+satisfy “everything is actionable.” Their actions may be inspect, filter, or
+explain.
+
+** Navigation is not mutation
+
+- =RET= visits or inspects; it never changes lifecycle state.
+- =TAB= reveals or hides.
+- =?= explains the row and available capabilities.
+- a mnemonic transient constructs an intervention.
+- destructive operations are never placed on navigation keys and require
+  confirmation.
+
+** Context is frozen at dispatch
+
+The human’s context point is captured when an instruction is sent. It is not a
+live pointer to wherever the user later moves.
+
+Human send anchors, agent evidence anchors, Workbench selection, and last
+visited artifacts are separate concepts and must never overwrite one another.
+
+** Actions produce control receipts
+
+The interface does not optimistically paint an operation as successful. It
+renders pending state, waits for an acknowledgement, and stores a structured
+control receipt containing target, request status, operation outcome, adapter
+revision, proof, and error or recovery guidance.
+
+** Refresh is reconciliation
+
+Push events make the interface feel live; periodic snapshots make it correct.
+Unknown or missing state remains visibly stale instead of disappearing or
+becoming a guessed terminal state.
+** Text is the rendering substrate, not the process database
+
+
+Org files may document the architecture. They are not authoritative runtime
+state. Lifecycle truth belongs to Pi sessions, =pi-subagents= records, missions,
+and their versioned APIs. This should be all humanly readable with symbols to signal quickly
+
+
+** Visual Feedback
+   Glancability and observability, leads to quickening of iteration and communication of intention across agents and human to exercise his autonomy and steer effectively
+
+
+Org files may document the architecture. They are not authoritative runtime
+state. Lifecycle truth belongs to Pi sessions, =pi-subagents= records, missions,
+and their versioned APIs.
+
+* Conceptual Model
+:PROPERTIES:
+:ID: pi-workbench-model
+:TYPE: architecture
+:END:
+
+** Intention plane — why work exists
+
+| Entity                | Meaning                                                |
+|-----------------------+--------------------------------------------------------|
+| Mission               | Durable human objective and constraints                |
+| Acceptance            | Conditions required to call work complete              |
+| Decision              | Open question, options, recommendation, resolution      |
+| Authored scope        | Files, ranges, or artifacts explicitly attached by intent |
+| Declared next action  | Explicitly ready work, when the mission API supports it |
+| Verification evidence | Proof or link for review, CI, PR, deployment, release  |
+
+Mission records are authoritative for intention. In the first mission-capable
+release, Workbench deep-links to the existing Pi/=pi-subagents= authoring flow;
+it does not invent a second mission store. Create/edit support enters Workbench
+only after the public mission API can express objective, acceptance, scope, and
+next action without loss.
+
+The intended journey is: author mission → attach or spawn an attempt → observe
+operational attention → inspect verification evidence → resolve decisions →
+close the mission. Fields unavailable from the public mission API are omitted,
+not reconstructed from prose.
+
+** Execution plane — how work is happening
+
+| Entity             | Meaning                                                |
+|--------------------+--------------------------------------------------------|
+| Pi owner           | Pimacs-owned root process/session that routes actions  |
+| Workflow           | Orchestration definition or graph                      |
+| Run attempt        | Immutable execution incarnation with lineage/authority |
+| Child              | Agent or nested workflow step within an attempt        |
+| Activity           | Current tool or factual last-observed operation        |
+| Transcript         | Child or root conversation output                      |
+| Lifecycle artifact | Status, events, output, handoff, patch                  |
+| Control receipt    | Acknowledgement and outcome of an operator intervention |
+
+Resume never rewrites attempt history. It creates a linked attempt when the
+runtime supports revival. A stopped attempt is non-resumable and requires a new
+replacement attempt; completed, failed, or paused attempts may be resumable only
+when the runtime advertises that capability and retained session state exists.
+Each attempt is explicitly =current=, =parallel=, =superseded=, or =abandoned=;
+historical presence never implies current control authority. Checkpoint revival
+may re-execute work before an interrupt, so replay/idempotency risk is part of
+the recovery detail.
+
+** Attention plane — what needs a human now
+
+Attention items are derived but have stable source references and three
+deterministic priority buckets:
+
+1. *Explicit request* — decision, approval, interview, or supervisor question.
+2. *Blocking condition* — failed/conflicted/review-blocking work, budget
+   exhaustion, or partial compound operation.
+3. *Advisory* — =needs_attention=, stale observation, or missing information.
+
+Each item also names an expected human/role when known. Leaving or re-entering
+the attention set follows a source-specific rule, never a color/status heuristic.
+
+Items deduplicate by source entity and reason. An intentional mission pause is
+not attention; an unexpected process pause may be. Missing acceptance evidence
+becomes attention only when completion or review has been requested.
+Acknowledging an item suppresses it until its source revision changes; snoozing
+suppresses it until a time boundary. Permanent suppression is not a v1 action.
+
+Approval/interview rows are offered only when a structured response API exists.
+Until then they are inspect-only links to the owning Pimacs chat, and completion
+is learned from a structured runtime event—not inferred from chat prose.
+
+An attention signal is not lifecycle truth. For example, =needs_attention=
+means “no activity observed past a threshold,” not “the child is stuck.”
+
+** Anchor plane — where intention and evidence touched the editor
+
+#+begin_example
+Anchor {
+  id
+  kind: human-send | agent-evidence | ui-selection | artifact
+  ownerSessionId
+  runId?
+  file?
+  line?
+  column?
+  marker?          // valid only while its Emacs buffer lives
+  contentDigest?   // detects file drift
+  capturedAt
+  label?
+}
+#+end_example
+
+Navigation prefers a live marker, then file/line/column, and finally an artifact
+or transcript fallback. Invalidated anchors remain inspectable and show why
+precise navigation is unavailable.
+
+* Interaction Grammar
+:PROPERTIES:
+:ID: pi-workbench-interaction
+:TYPE: ux
+:END:
+
+** Default buffer
+
+#+begin_example
+ATTENTION                                                       3
+  ! Decision · choose retry strategy                         4m
+      Ship auth refresh · mission 91ab
+  ! reviewer · acceptance failed                             2m
+      2 tests missing · attempt 7fc2
+  ~ worker · no activity observed                           40s
+      bash: mix test · child b014
+
+MISSIONS                                                        2
+  Ship auth refresh                                      active
+    intent       Implement and validate token refresh
+    acceptance   3/4 evidence requirements
+    decisions    1 open
+    current      attempt 7fc2 · active
+      worker     editing · lib/auth.ex                    38s
+      reviewer   waiting                                 1m
+    previous     attempt 693a · failed · output available
+
+  Simplify telemetry                                 completed
+    acceptance   4/4 · reviewed
+    evidence     patch · CI
+
+UNSCOPED ACTIVITY                                               1
+  pimacs:doom-config
+    scout · running · intent unspecified                    12s
+#+end_example
+
+Information density grows around point. Collapsed rows remain quiet and
+scannable; expansion reveals objective, exact status, recent activity,
+acceptance, anchors, artifacts, verification evidence, and control receipts.
+
+** Entry, switching, and empty states
+
+The default command opens operational attention for the current Pimacs owner.
+=P= opens a projection switcher (Attention, Mission, Fleet, History); =b= returns
+to the previously selected semantic entity and disclosure state. =RET= may move
+from an attention item into its mission/attempt source, then into evidence; =b=
+retraces that path without relying on buffer position.
+
+First-use states always name one safe next action:
+
+| State                       | Next action                                  |
+|-----------------------------+----------------------------------------------|
+| No Pimacs owner connected   | Start or visit a Pimacs chat                 |
+| Owner connected, no snapshot| Reconcile                                    |
+| No attention items          | View collapsed active work                   |
+| Mission capability absent   | Explain capability and open authoring surface |
+| Owner disconnected          | Reconnect; retain read-only stale evidence   |
+
+** Stable point context
+
+Every rendered section carries a typed payload, never merely text to parse:
+
+#+begin_example
+SectionTarget {
+  entityKind
+  entityId
+  ownerConnectionId
+  observedRevision
+  capabilities[]
+  inspectTarget?
+}
+#+end_example
+
+One context accessor resolves the same target from keyboard point, mouse click,
+or context-menu invocation. Transients and commands consume this target.
+
+** Core keys
+
+| Key       | Meaning                                                   |
+|-----------+-----------------------------------------------------------|
+| =RET=     | Inspect or visit the semantic object at point              |
+| =M-RET=   | Inspect in another window                                  |
+| =TAB=     | Toggle section                                             |
+| =S-TAB=   | Cycle global visibility                                    |
+| =n= / =p= | Next / previous semantic section                           |
+| =^=       | Parent section                                             |
+| =1..4=    | Local disclosure depth                                     |
+| =g=       | Reconcile this owner/view                                  |
+| =G=       | Reconcile all connected owners                             |
+| =P=       | Switch projection                                          |
+| =b=       | Return to previous semantic entity                         |
+| =?=       | Explain state, provenance, staleness, and capabilities      |
+| =a=       | Contextual action transient                                |
+| =m=       | Message transient: steer, follow-up, or scoped intervention |
+| =v=       | Visit transient: chat, anchor, transcript, output, artifact |
+| =q=       | Quit window                                                 |
+
+Mutation suffixes appear only when applicable. A disabled action explains the
+missing capability or invalid state rather than silently vanishing when that
+explanation is useful.
+
+** Visits
+
+=RET= is intentionally conservative and deterministic:
+
+| Row             | Default visit                                      |
+|-----------------+----------------------------------------------------|
+| Attention item  | Source decision, run, or contradictory observation |
+| Mission         | Mission detail projection                          |
+| Active child    | Child transcript at last stable context point      |
+| Tool activity   | Evidence anchor or tool transcript                 |
+| Artifact        | File, URL, patch, or output                        |
+| Pi owner        | Pimacs chat buffer                                 |
+| Stale row       | Provenance and reconciliation detail               |
+
+** Contextual action matrix
+
+| Entity/state        | Safe actions                                                   |
+|---------------------+----------------------------------------------------------------|
+| Mission             | inspect; resolve decision; mark mission paused; close          |
+| Active attempt      | inspect; steer; follow-up; interrupt; confirmed stop           |
+| Paused attempt      | inspect recovery state; resume when advertised                 |
+| Completed/failed attempt | inspect evidence; resume when advertised; launch replacement |
+| Stopped attempt     | inspect terminal proof; launch replacement                     |
+| Active child        | exact-child steer/interrupt when supported; stop owning run where required |
+| Decision            | inspect; resolve through structured mission API                 |
+| Approval/interview  | inspect owning chat; respond only through structured API        |
+| Attention item      | inspect source; acknowledge-until-change; snooze                |
+| Artifact/evidence   | visit; copy path/URL; no lifecycle mutation required            |
+| Control receipt     | inspect request, outcome, proof, and recovery                   |
+| Human anchor        | visit; replace; expire                                           |
+| Root Pi session     | visit chat; root steer/follow-up; abort root agent separately    |
+
+“Mark mission paused” changes continuation intent and has no process-control
+effect. “Abort root chat,” “interrupt child turn,” and “stop delegated attempt”
+are distinct verbs with distinct confirmation and outcome semantics.
+
+* Contextual Transients
+:PROPERTIES:
+:ID: pi-workbench-transients
+:TYPE: ux
+:END:
+
+A transient previews and parameterizes intent. It does not pretend a multi-step
+operation is atomic. Transient history may retain harmless presentation choices,
+but never owner epochs, target handles, revisions, sensitive intervention text,
+or destructive arguments. Every suffix revalidates at dispatch.
+
+** Message transient
+
+#+begin_example
+Target: worker b014 · attempt 7fc2 · pimacs:dojo
+Context to capture: point · lib/auth.ex:84 (clean)
+
+Delivery
+  -s  steer       next safe turn boundary
+  -f  follow-up   after the run settles
+  -a  auto        immediate between turns, steer mid-turn
+
+Scope
+  -p  point       lib/auth.ex:84
+  -r  region      lib/auth.ex:84-112
+  -m  mission     Ship auth refresh
+  -x  none
+
+Actions
+   s  Send intervention
+   e  Edit message
+   ?  Explain delivery semantics
+#+end_example
+
+Before dispatch this is a draft anchor. Dispatch atomically captures an
+immutable =human-send= anchor, and the control receipt records its anchor ID.
+The composed message names the context to capture and exact owning target.
+
+** Lifecycle transient
+
+#+begin_example
+Target: attempt 7fc2 · active · adapter rev 184
+
+Safe
+  i  Inspect status
+  t  Open transcript
+  o  Open output
+
+Control
+  n  Interrupt current turn
+  r  Resume (unavailable while active)
+  k  Stop attempt...         [confirmation]
+
+Compound
+  R  Replace attempt...      [previewed saga]
+#+end_example
+
+** Compound interventions are sagas
+
+For example, “replace this attempt” means:
+
+1. validate the target and advertised capabilities;
+2. request stop;
+3. wait for acknowledged terminal state;
+4. verify process-terminal proof when filesystem safety depends on it;
+5. launch or resume the replacement;
+6. attach it to the mission;
+7. report every completed step and any recovery path.
+
+The UI renders partial completion. It never labels this sequence transactional.
+
+* Refresh and Consistency
+:PROPERTIES:
+:ID: pi-workbench-refresh
+:TYPE: architecture
+:END:
+
+** Snapshot plus delta
+
+Each owner connection provides, when supported:
+
+- a versioned capability handshake;
+- a full snapshot tagged with =(ownerEpoch, adapterRevision)=;
+- epoch-scoped ordered deltas;
+- an explicit completion/control event channel;
+- a reconciliation command.
+
+=adapterRevision= detects stale Workbench observations; it is not package
+lifecycle authority. Every mutation still revalidates owner/session and target
+state inside =pi-subagents=. Until sequenced deltas exist, advertise
+=deltas: null= and reconcile by snapshot. Any sequence gap disables mutation
+until a new full snapshot arrives.
+
+** Transactional rendering
+
+A full buffer refresh:
+
+1. captures selected section identity and relative point;
+2. captures window-start section identity and relative offset;
+3. captures explicit visibility choices;
+4. rebuilds under =inhibit-read-only= from one immutable model revision;
+5. restores the same stable identity or nearest surviving ancestor/successor;
+6. restores window start where possible;
+7. runs post-refresh hooks and clears modified state.
+
+No intermediate mixed snapshot is rendered.
+
+** Stable identity
+
+Identity is a lineage of entity kind plus immutable domain ID, not section type
+alone. Example:
+
+#+begin_example
+((child . "b014")
+ (run . "7fc2")
+ (mission . "91ab")
+ (owner . "pimacs:dojo:session-2a1f"))
+#+end_example
+
+This supports point and visibility restoration even when section objects are
+recreated or siblings share a type.
+
+** Visibility preserves user intent
+
+Use four states, following Pimacs’s valuable distinction:
+
+- =autoshow= — policy-visible, never manually toggled;
+- =autohide= — policy-hidden;
+- =show= — explicitly shown by user;
+- =hide= — explicitly hidden by user.
+
+Automatic folding never overrides =show= or =hide= and never collapses the
+section containing point. Isearch may reveal hidden bodies temporarily.
+
+** Staleness
+
+A row is stale when its owner disconnects, reconciliation fails, or its observed
+revision is older than a configured threshold. Stale rows:
+
+- remain visible;
+- show last observation time and provenance;
+- allow inspection of durable evidence;
+- disable lifecycle mutation;
+- offer reconnect/reconcile rather than pretending terminality.
+
+* Architecture
+:PROPERTIES:
+:ID: pi-workbench-architecture
+:TYPE: architecture
+:END:
+
+** Component A — Workbench supervisor tree
+
+Magpi is both porcelain and supervisor. Emacs owns every deliberate Pi child
+process and therefore knows its exact process, session, role, parent, context,
+capabilities, and generation.
+
+#+begin_example
+magpi-root-supervisor                 one-for-one
+├─ registry                          permanent
+├─ event-journal                     permanent
+├─ attention-projector               transient
+├─ projection-supervisor             one-for-one
+└─ agent-dynamic-supervisor           one-for-one
+   ├─ agent-supervisor <attempt-a>    temporary
+   │  ├─ rpc-transport
+   │  ├─ event-reducer/mailbox
+   │  └─ attempt-state
+   └─ agent-supervisor <attempt-b>    temporary
+#+end_example
+
+This is an OTP design discipline, not an attempt to emulate BEAM processes
+inside Emacs. Each component has one owner, an explicit failure boundary, a
+restart policy, and reconstructible state.
+
+** Component B — Child specifications and attempt identity
+
+Every launch begins from an immutable child specification:
+
+#+begin_example
+ChildSpec {
+  attemptId
+  parentAttemptId?
+  missionId?
+  role
+  cwd
+  argv
+  contextCapsuleId
+  toolPolicy
+  modelPolicy
+  worktreePolicy
+  restart: temporary | transient | permanent
+  shutdownTimeoutMs
+}
+#+end_example
+
+Agent attempts default to =temporary=: normal completion, model failure, or an
+unexpected process exit never silently reruns potentially side-effecting work.
+Recovery creates a linked attempt with a new ID. Only infrastructure children
+such as a projection worker may be =transient= or =permanent=. Restart intensity
+and exponential backoff prevent crash loops.
+
+The default supervisor strategy is =one-for-one=. A child failure does not kill
+siblings, its parent agent, or its children. Cascading shutdown is an explicit
+operator policy, never an accidental consequence of topology.
+
+** Component C — RPC transport as a monitored child
+
+Each agent is an ordinary =pi --mode rpc= process with a dedicated session name
+and working directory. Pimacs already proves the JSONL transport and supports
+multiple names at one project root. Magpi initially isolates Pimacs private calls
+behind one compatibility module, then promotes the smallest useful client API.
+
+The process sentinel is a *monitor*, not a link: it reports exit to the mailbox.
+It never directly edits domain state or repaints the UI. Stop is a sequence:
+request turn abort, request graceful process shutdown, wait for sentinel proof,
+then escalate after timeout. Process exit is evidence, not proof that filesystem
+effects rolled back or mission intent succeeded.
+
+** Component D — Mailboxes and reducers
+
+Process filters only frame UTF-8 JSONL and enqueue typed events. One serialized
+mailbox drain per attempt reduces events into state. Rendering, attention
+derivation, receipts, and parent handoff run from reduced state—not from filters
+or sentinels.
+
+Core messages include:
+
+#+begin_example
+spawn-request   rpc-event       control-request
+process-exit    reconcile       timeout
+child-result    parent-handoff  projection-invalidated
+#+end_example
+
+This borrows GenServer’s strongest property: one logical owner processes one
+ordered mailbox. It prevents interleaved callbacks from producing mixed state.
+
+** Component E — Registry and event journal
+
+The Registry maps immutable IDs to the current process generation, session file,
+buffer, role, parent, and capabilities. Display names are labels only.
+
+An append-only bounded journal records launches, lifecycle facts, operator
+commands, acknowledgements, attention transitions, and handoffs. Materialized
+snapshots are rebuilt from the journal plus live RPC state. Secrets and replayable
+capabilities are redacted; large transcript/artifact data remains in its owning
+file and is linked by digest/path.
+
+“Let it crash” here means: stop trusting corrupted in-memory state, preserve the
+failure fact, reconstruct projections, and ask policy whether to create a new
+attempt. It never means blindly restart an LLM that may already have mutated the
+worktree.
+
+** Component F — Context capsules and handoff
+
+Workbench does not fork full context by default. It creates a deliberate capsule:
+
+#+begin_example
+ContextCapsule {
+  objective
+  selectedParentEntries[]
+  decisions[]
+  frozenAnchors[]
+  fileExcerpts[]
+  constraints[]
+  nonGoals[]
+  roleInstructions
+  expectedOutput
+  acceptance
+  provenance: { parentSessionId, parentEntryId, dispatchedAt }
+}
+#+end_example
+
+The capsule is the supervision start argument. Full fork remains an explicit
+policy. Human launches come from a Transient at point. Agent-initiated launches
+can use a narrow =workbench_delegate= tool: Pimacs observes its standard tool
+event, Magpi spawns asynchronously, and completion returns through ordinary
+parent =follow_up=. No custom external RPC method is required.
+
+** Component G — Domain core and projections
+
+The renderer-independent core owns intention, execution, attention, anchors,
+receipts, stable identity, action eligibility, and stale-state derivation. Magit
+Section supplies projections and contextual Transients. Unknown lifecycle states
+render as unknown and disable mutation.
+
+** Component H — Optional compatibility adapters
+
+=pi-subagents= remains valuable prior art for worktrees, acceptance, lifecycle
+artifacts, recovery, and role contracts. A later adapter may project its runs as
+externally owned read-only entities or add control when a clean seam exists.
+Magpi v1 does not wait for that seam and does not import internal package modules.
+
+* Internal Supervision Contract
+:PROPERTIES:
+:ID: pi-workbench-protocol
+:TYPE: protocol
+:END:
+
+This is an internal, versioned mailbox/journal contract. Standard Pi RPC remains
+unchanged at the process boundary.
+
+** Launch
+
+#+begin_example
+launch {
+  schemaVersion: 1
+  requestId
+  childSpec
+  contextCapsule
+  expectedRegistryRevision
+}
+#+end_example
+
+The supervisor validates uniqueness, policy, cwd/worktree, limits, and context
+bounds before starting a process. Acceptance creates the attempt record before
+OS spawn, so startup failure is still attributable.
+
+** Normalized event
+
+#+begin_example
+agentEvent {
+  schemaVersion: 1
+  eventId
+  attemptId
+  generation
+  sequence
+  observedAt
+  source: rpc | sentinel | operator | timer | recovery
+  type
+  payload
+}
+#+end_example
+
+Duplicate =eventId= is idempotent. A sequence gap marks the attempt stale and
+triggers RPC reconciliation. Events from an obsolete generation remain evidence
+but cannot mutate the current attempt incarnation.
+
+** Control request
+
+#+begin_example
+controlRequest {
+  requestId
+  attemptId
+  expectedGeneration
+  expectedRevision
+  action: steer | follow_up | interrupt | terminate | replace
+  input
+  anchorId?
+  actor
+  rationale?
+}
+#+end_example
+
+The reducer revalidates process liveness, state, and capability immediately
+before dispatching standard Pi RPC. =replace= is a saga that terminates one
+attempt and launches a new linked attempt; it is not a restart of the same ID.
+
+** Control receipt
+
+#+begin_example
+controlReceipt {
+  requestId
+  attemptId
+  generation
+  action
+  requestStatus: accepted | rejected
+  operationStatus: pending | succeeded | partial | failed | outcome_unknown
+  delivery?
+  createdAt
+  acceptedAt?
+  completedAt?
+  result?: { lifecycleState?, registryRevision?, processExit? }
+  error?
+  recovery[]?
+}
+#+end_example
+
+A late sentinel or reconciliation may resolve =outcome_unknown= while preserving
+the interval of uncertainty. Process exit, message delivery, operation completion,
+and mission success are separate facts.
+
+** Supervision invariants
+
+- One mailbox is the sole writer for one attempt’s state.
+- Attempt IDs are immutable; generations distinguish process replacement during
+  startup/recovery, never semantic retry.
+- Agent attempts are not automatically restarted.
+- Parent completion does not kill children; child failure does not kill siblings.
+- Every cascade, restart, replacement, and worktree cleanup has explicit policy.
+- Filters and sentinels enqueue facts and never render or perform domain mutation.
+- All control uses standard Pi RPC against a registry-resolved live process.
+- Duplicate launch/control IDs are idempotent within bounded retention.
+- Context capsules, events, pending controls, and journal records are bounded.
+- Secrets are redacted and durable records are user-clearable.
+- Unknown events are retained diagnostically and cannot enable mutation.
+- On Emacs restart, journal recovery produces stale/read-only attempts until live
+  process/session ownership is proven.
+* Existing Pieces and Their Future
+:PROPERTIES:
+:ID: pi-workbench-existing
+:TYPE: decision
+:END:
+
+** Pimacs — retain and strengthen
+
+Retain as the chat window and root Pi RPC transport. Reuse its event dispatch,
+batching, session labels/stats, and proven streaming behavior. Establish a small
+public client API and avoid broad dependence on private internals.
+
+** Pimacs Section — borrow carefully
+
+Its hierarchical sections, overlays, navigation, four-state visibility, and
+incremental replacement are excellent. Its type-only identity collides for
+repeated siblings; add stable section values or use Magit Section for Workbench
+projections.
+
+** Magit and Transient — interaction grammar
+
+Borrow stable section identity, transactional refresh, cursor/window recovery,
+visibility caching, context resolution, key grammar, and transients. Do not copy
+Git’s assumption of synchronous authoritative state or imply saga atomicity.
+
+** pi-subagents — supervision prior and optional backend
+
+Borrow its one-writer, worktree, acceptance, lifecycle, artifact, and recovery
+contracts. Do not make it Magpi’s authority, scrape its TUI, or import internal
+modules. A later adapter can expose its runs with visibly different ownership.
+
+** emx — keep semantic navigation, retire ACP mock state
+
+Retain symbol-aware source navigation. Preserve two design ideas from its ACP
+prototype: frozen human context at send time and an attention-first vocabulary.
+Do not build on the prototype agent registry, queue, approvals, or log; they are
+in-memory placeholders and several actions are stubs.
+
+** dojo bridge — deprecate only as control plane
+
+Do not migrate Org properties into runtime orchestration. Split still-useful
+source↔documentation navigation into a project-local doctools package. Then:
+
+1. mark agent/control bridge functions deprecated;
+2. forbid new lifecycle writes or dependencies;
+3. migrate callers of useful human navigation;
+4. remove the global eager load;
+5. keep Org documents as documentation.
+
+* Delivery Path and Gates
+:PROPERTIES:
+:ID: pi-workbench-delivery
+:TYPE: plan
+:END:
+
+** Stage 0 — Supervisor kernel with fake child
+
+Build an ERT-tested supervisor using a deterministic fake Pi RPC process:
+
+- child specification and immutable attempt IDs;
+- Registry with process generation;
+- UTF-8 JSONL framer;
+- serialized per-attempt mailbox/reducer;
+- process sentinel monitoring;
+- append-only bounded journal;
+- one-for-one failure isolation;
+- temporary attempt policy and crash-loop protection.
+
+Exit gate: split/multiple frames, startup failure, late callbacks, duplicate
+requests, process exit, dead buffers, and reconstruction all yield deterministic
+state without repainting from callbacks.
+
+** Stage 1 — One real Workbench-owned Pi child
+
+Spawn one named =pi --mode rpc= session at the current project root with an
+explicit context capsule and policy-selected model/tools/context files.
+
+Prove:
+
+- parent → child provenance;
+- transcript and tool activity projection;
+- exact-target steer/follow-up/interrupt through standard RPC;
+- acknowledged control receipts;
+- graceful terminate followed by sentinel proof;
+- completion handoff to the parent through ordinary =follow_up=;
+- optional =workbench_delegate= tool request without model-relayed management.
+
+Exit gate: the human can launch from point, inspect the child, steer it, observe
+the receipt, and return to the frozen dispatch anchor.
+
+** Stage 2 — Read-only operational attention porcelain
+
+Add Attention, Attempts, and History projections with stable point/folding:
+
+- explicit child request, blocking failure, and advisory stale buckets;
+- collapsed active attempts with nested children;
+- transcript, output, patch, anchor, and artifact visits;
+- stale/disconnected evidence;
+- deterministic acknowledge-until-change and snooze.
+
+Exit gate: users answer what needs attention, what was reported, where evidence
+lives, and which exact attempt owns it without opening raw JSON or chat commands.
+
+** Stage 3 — Narrow acknowledged interventions
+
+Add contextual Transients for:
+
+- steer versus follow-up;
+- interrupt current turn;
+- terminate attempt with graceful/forced phases;
+- replace with a linked attempt;
+- child-specific message and result handoff.
+
+Exit gate: every action is registry-routed, generation/revision checked, and
+renders request, delivery, operation, and process evidence separately.
+
+** Stage 4 — Workbench-native mission and acceptance
+
+Add durable authored intent to the journal/domain model:
+
+- mission objective, constraints, scope, and next action;
+- acceptance requirements and verification evidence;
+- open decisions and typed human requests;
+- attempt attachment and lineage;
+- pause continuation intent without implying process pause;
+- close with explicit evidence and residual risk.
+
+Exit gate: author mission → launch attempt → attend → inspect evidence → resolve
+decision → close, without reconstructing intent from chat.
+
+** Stage 5 — Worktrees, policies, and compound sagas
+
+Add:
+
+- one-writer enforcement and managed Git worktrees;
+- restart/replacement policy preview;
+- stop → terminal proof → replacement sagas;
+- concurrency and budget controls;
+- replay/idempotency warnings;
+- bounded retention and cleanup.
+
+** Stage 6 — Multi-project and optional external backends
+
+Only after one Workbench-owned tree is reliable:
+
+- aggregate project supervisors;
+- route actions to exact owning Emacs/Pi process;
+- show global attention with stale-owner reporting;
+- add a read-only =pi-subagents= adapter;
+- permit external control only when its backend exposes equivalent identity,
+  authority, and receipt guarantees.
+
+* Verification Strategy
+:PROPERTIES:
+:ID: pi-workbench-verification
+:TYPE: test-plan
+:END:
+
+** Supervision and transport tests
+
+- child-spec validation and duplicate launch idempotency;
+- one-for-one isolation and explicit non-cascade behavior;
+- temporary attempts never auto-restart; infrastructure obeys intensity/backoff;
+- split UTF-8/JSONL frames, multiple frames per chunk, bounded undecoded tail;
+- filter/sentinel interleaving, dead buffers, and obsolete-generation callbacks;
+- mailbox ordering and one-writer state mutation;
+- graceful terminate, escalation timeout, and sentinel proof;
+- Emacs restart reconstruction produces stale/read-only state;
+- context capsule bounds, provenance, and redaction;
+- control receipt request/delivery/operation/process distinctions.
+
+** Emacs model tests
+
+- normalization preserves opaque IDs and unknown fields;
+- attention derivation never changes lifecycle state;
+- attention deduplicates and acknowledgement expires on source change;
+- intentional pause and incomplete-but-not-requested evidence do not alert;
+- missing intent remains missing;
+- action eligibility is capability and state driven;
+- owner routing is unambiguous;
+- anchor fallback detects drift;
+- stale rows disable mutation but retain visits.
+
+** Rendering tests
+
+- repeated sibling types retain distinct root-to-leaf identity lineage;
+- keyboard, mouse, and context-menu resolution produce the same target;
+- refresh restores point, relative line, window start, and explicit visibility;
+- deletion chooses successor/ancestor; reparenting, sorting, and filtering restore
+  the same entity when visible or a deterministic projection fallback;
+- burst events coalesce into one coherent render;
+- hidden sections open temporarily for isearch;
+- projection switch and back restore semantic selection;
+- empty states offer one safe next action;
+- disabled transient actions explain why;
+- no command parses rendered text to discover a target.
+
+** End-to-end scenarios
+
+1. Observe an attention item, inspect its source, visit evidence, steer the exact
+   child, observe acknowledgement and activity, then return to the same item.
+2. Stop active attempt A and verify terminal proof; launch replacement attempt B;
+   separately resume resumable completed/failed/paused attempt C with a message.
+3. Disconnect Pi during steer, show =outcome_unknown= or failed receipt, reconnect,
+   rotate the epoch, and reconcile without duplicate delivery.
+4. Author or deep-link to a mission, attach an attempt, resolve a decision, inspect
+   verification evidence, and close the mission.
+5. Keep two Pimacs owners open and prove an intervention reaches only the selected
+   owner.
+
+* Success Measures
+:PROPERTIES:
+:ID: pi-workbench-success
+:TYPE: product
+:END:
+
+Measure the interface by operator outcomes, not node count:
+
+- time to identify the item needing attention;
+- time to reach the last human send anchor or relevant evidence;
+- interventions sent to the intended target / total interventions;
+- actions requiring fallback to raw status files or chat commands;
+- stale-state mutations attempted (target: zero accepted);
+- percentage of actions with a structured acknowledgement receipt;
+- cursor/folding disruptions during live refresh;
+- user ability to distinguish root abort, child interrupt, and run stop.
+
+* Non-Goals
+:PROPERTIES:
+:ID: pi-workbench-non-goals
+:TYPE: decision
+:END:
+
+- No universal knowledge graph or Org-backed orchestration database.
+- No global multi-project dashboard before single-owner control is trustworthy.
+- No inferred mission intent from tool activity or agent names.
+- No control by scraping terminal, FleetView text, widget strings, or logs.
+- No direct writes to lifecycle or mission artifact files.
+- No generic “restart agent” verb that hides stop/resume/spawn differences.
+- No claim that transient compound actions are atomic.
+- No automatic approval based only on broad tool or action names.
+- No replacement of Pimacs chat or emx semantic source navigation.
+- No requirement that every informational scalar have a mutating action.
+
+* Dangerous Seductions
+:PROPERTIES:
+:ID: pi-workbench-seductions
+:TYPE: risk
+:END:
+
+1. *The omniscient tree* — concurrent, distributed state is always partially
+   observed.
+2. *Activity as intention* — the last tool says what happened, not why it matters.
+3. *All agents are alike* — owner sessions, workflows, runs, and children have
+   different authority.
+4. *A display key is a control ID* — glanceable projections may intentionally hide
+   package-owned identity.
+5. *Lifecycle files are an API* — they are recovery evidence, not a safe write path.
+6. *The existing ACP looks close* — most of its control actions are placeholders.
+7. *Private Pimacs internals are good enough* — prototype quickly, then establish a
+   supported seam before productization.
+8. *Transients imply transactions* — distributed control operations can partially
+   succeed.
+9. *Point is always current context* — freeze the human anchor at dispatch.
+10. *More alerts mean more control* — quiet, ranked attention is better than focus
+    theft.
+11. *Build global first* — multi-owner routing multiplies uncertainty before the
+    interaction contract is proven.
+
+* Required Decisions Before Implementation
+:PROPERTIES:
+:ID: pi-workbench-decisions
+:TYPE: decision
+:END:
+
+** Resolved decisions
+
+1. Magpi Workbench owns the deliberate Pi process tree.
+2. Supervision follows OTP principles: explicit child specs, one owner/mailbox,
+   monitors, failure isolation, restart policy, and reconstructible state.
+3. Context is passed through deliberate capsules; full transcript fork is opt-in.
+4. =pi-subagents= is prior art and an optional later backend.
+5. =RET= remains inspect-only; destructive actions live behind Transients.
+
+** Implementation decisions still open
+
+1. Should the first transport wrapper extend Pimacs internals or live as a small
+   independent =magpi-rpc.el= client?
+2. Where does the project journal live, and which records survive user clearing?
+3. Which infrastructure children, if any, are =permanent= versus =transient=?
+4. What is the default shutdown timeout before forced process termination?
+5. Which context sources are inherited by default: AGENTS files, skills,
+   extensions, selected messages, file excerpts?
+6. Does =workbench_delegate= ship in Stage 1 or follow the human-driven launch?
+7. Is cross-project aggregation explicitly deferred to Stage 6?
+8. What are the bounds and retention policies for attempts, attention
+   acknowledgements, control receipts, and idempotency keys?
+
+* Recommended Next Move
+:PROPERTIES:
+:ID: pi-workbench-next
+:TYPE: plan
+:END:
+
+Begin with the supervisor kernel, not the full status buffer.
+
+Implement one fake RPC child and prove the OTP invariants: child specification,
+Registry, mailbox serialization, monitor/sentinel handling, temporary attempt
+semantics, journal reconstruction, and one-for-one failure isolation.
+
+Then spawn one real named Pimacs/Pi RPC child using an explicit context capsule
+and prove the central vertical slice:
+
+#+begin_quote
+launch from frozen point → inspect child → exact steer → control receipt
+→ return to anchor → completion handoff
+#+end_quote
+
+No upstream Pi or =pi-subagents= RPC addition blocks this path. Broader views,
+missions, worktrees, autonomous delegation, and external backends follow only
+after the Workbench-owned supervision semantics are trustworthy.

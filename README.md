@@ -12,17 +12,42 @@ foldable sections. `magpi.el` owns attempt orchestration; the sole
 Pimacs-private adapter is `magpi-pimacs-backend.el`. The status adapter receives
 read-model, visit, and spawn callbacks.
 
-Dispatch is a single frozen `magpi-launch-spec`: profile resolution, authority,
-context, flags, and first message are settled before backend launch. Intention
-may be explicitly absent; Magpi renders a quiet `◯` until the backend supplies a
-session title. Model selection remains Pimacs's provider-aware `m` command.
+Dispatch freezes a `magpi-launch-spec` containing root, profile, requested
+model, thinking/effort, authority, and context. The launch Transient exposes
+intention, model (Inherit or `provider/model`), effort, profile, context, and
+authority. Effort may defer to the profile or override it; model remains optional
+(`nil` means inherit). Status projection uses a small face hierarchy so identity,
+activity, authority, and evidence scan at different weights. The Pimacs launch
+compiles transport flags and an injective session identity while installing the
+attempt listener; `magpi-backend-send-initial` then compiles and sends the
+initial prompt at most once. Authored intent is the heading and is immutable
+on the attempt; title, running model, and token usage are separate runtime
+observations. Model selection is deliberately not a Magpi control surface in this
+cut.
+
+The domain uses three plain records: `Attempt` (`id`, immutable `intent`,
+`launch`, `observation`, `started-at`), `Launch` (frozen configuration), and
+`Observation` (runtime facts, including session token usage). Backend handles live in a separate registry. Event
+listeners capture only an attempt ID; `magpi-attempt-reduce` returns the same
+attempt when a fact is restated, otherwise a new value which is atomically
+replaced in that registry. Event paints never reconcile; `g` is the snapshot
+pull. Point/Region context is source-file evidence only.
+
+## Boundaries and tests
+
+Keep authored intent and launch configuration as immutable plain data. Backends
+normalize transport events into facts; the pure reducer returns a new attempt;
+`magpi.el` alone owns registry replacement and effects; status is read-only.
+Tests follow those boundaries: launch normalization, reduction, adapter
+normalization and compilation, orchestration, then projection. In particular, no
+backend observation may alter intent or launch configuration.
 
 ## Layout
 
 ```text
 magpi/
 ├── emacs/       # installable Emacs Lisp frontend, model, and tests
-├── docs/        # canonical design and research notes
+├── docs/        # MAGPI.org, why/run/locus freeze, research notes
 ├── Makefile     # reproducible local checks
 └── README.md
 ```
