@@ -1,1103 +1,214 @@
-#+title: Magpi — Master Design and Build Order
+#+title: Magpi
 #+author: ks0m1c
-#+date: <2026-08-14 Fri>
-#+filetags: :magpi:pi:emacs:elixir:otp:master:
+#+filetags: :magpi:pi:emacs:design:
 #+startup: overview indent hidestars
+#+subtitle: Intention-first Emacs porcelain for deliberate Pi work
 
 * Authority
-:PROPERTIES:
-:ID: magpi-authority
-:TYPE: decision
-:END:
 
-This is the canonical Magpi document. It composts the useful parts of
-=PI-WORKBENCH.org= and =PI-WORKBENCH-FEASIBILITY.org=. Those files remain source
-notes; contradictions resolve in favor of this file.
+This file is the canonical Magpi design. Git holds prior proposals and notes.
+When they disagree, this file wins.
 
-Plane separation for authored why, attempt lineage, and git/worktree
-isolation is normative in [[file:INTENTION-WORKSPACE.org][INTENTION-WORKSPACE.org]]. Build order still
-resolves here; that file wins only on the intention/workspace split.
+* Proposition
 
-The build order is normative. A later phase may not smuggle an unproven concern
-into an earlier one.
-
-* Thesis
-:PROPERTIES:
-:ID: magpi-thesis
-:TYPE: vision
-:END:
-
-Magpi is an actionable Emacs porcelain over a durable Elixir supervisor for Pi
-sessions.
+Magpi is a small Emacs porcelain for deliberate Pi work in one Git repository.
 
 #+begin_quote
-Emacs owns embodied intention. Elixir owns runtime supervision. Pi performs the
-work. Every intervention names an exact attempt and produces evidence.
+State the why. Bind only the context it needs. Spawn an action. See the work. React.
 #+end_quote
 
-The user should answer, at a glance:
-
-1. What did I intend?
-2. What is happening?
-3. What needs me?
-4. Where is the evidence?
-5. What exact series of action stairstepped can express  my intention?
-
-* Governing Decisions
-:PROPERTIES:
-:ID: magpi-decisions
-:TYPE: decision
-:END:
-
-1. *Workbench-owned*: Magpi, not =pi-subagents=, owns deliberate Pi attempts.
-2. *Elixir core*: OTP owns processes, lifecycle, policy, journal, and recovery.
-3. *Emacs frontend*: point, markers, buffers, Magit sections, Transients, and
-   context drafting remain in Emacs.
-4. *Pi unchanged*: attempts use ordinary =pi --mode rpc=.
-5. *Explicit context*: bounded capsules replace ambient transcript inheritance.
-6. *Immutable attempts*: retry, resume, fork, and replacement never rewrite
-   history.
-7. *No automatic agent restart*: infrastructure may restart; attempts do not.
-8. *Attention first*: attention is an operator projection, not lifecycle state.
-9. *Read before write*: inspection ships before intervention.
-10. *One owner*: one GenServer is the sole writer for one attempt state.
-
-* Nouns
-:PROPERTIES:
-:ID: magpi-nouns
-:TYPE: reference
-:END:
-
-| Noun       | Exact meaning |
-|------------+---------------|
-| Intention  | Authored objective; optional grouping record when membership exists |
-| Mission    | Later enrichment of Intention (decisions, evidence, close). Not a parallel type |
-| Attempt    | One immutable Pi execution incarnation |
-| Child      | Attempt whose provenance names a parent attempt |
-| Generation | OS-process incarnation used during startup/recovery |
-| Capsule    | Frozen, bounded context passed at launch |
-| Workspace  | Filesystem locus and writer grant for an attempt |
-| Event      | Append-only observed fact |
-| Snapshot   | Materialized state at a journal revision |
-| Attention  | Derived request for human action |
-| Anchor     | Frozen human or evidence location |
-| Control    | Exact-target operator request |
-| Receipt    | Request, delivery, operation, and proof record |
-| Evidence   | Artifact supporting a claim or acceptance condition |
-
-A supervision tree contains failure ownership. A mission graph contains intent.
-An attention list contains requested human action. A workspace/git graph contains
-mutation containment. They are not one tree. See
-[[file:INTENTION-WORKSPACE.org][INTENTION-WORKSPACE.org]].
-
-* Pattern Order
-:PROPERTIES:
-:ID: magpi-pattern-order
-:TYPE: architecture
-:END:
-
-The order is deliberate.
-
-** 1. Identity before process
-
-Mint =attempt_id= before OS spawn. Record launch intent before observing output.
-Display names never control anything.
-
-Identity:
-
 #+begin_example
-{attempt_id, generation, parent_attempt_id?, intention_id?}
+intention → action → chat / edits → glance changes → Magit → react
 #+end_example
 
-** 2. Ownership before concurrency
+It should make that loop quieter and safer than coordinating chats, worktrees,
+and Magit by hand. It is not an agent OS, workflow engine, second chat client,
+fleet dashboard, or shadow Git.
 
-One =Magpi.Attempt= GenServer owns one attempt state and one Pi subprocess.
-No process filter, UI callback, or projector may mutate it directly.
+* Names
 
-** 3. Mailbox before projection
+| Name | Being | Not |
+|------+-------+-----|
+| Intention | the why | a prompt, a branch, a chat |
+| Action | one doing | a ticket, a retry of the same |
+| Changes | the flux (values on the intention) | a struct, a workspace |
+| Role | =writer= or =reader= | authority, access |
+| Bind | give context to the surface at point | a hidden prompt |
+| React | intervene in the world | chat prose, automatic approval |
+| Observation | reported fact | permission |
+| Ask | Pi question inside an observation | a Magpi aggregate |
+| Adapter | Pimacs translation | a runtime, a plugin platform |
 
-All external facts become messages. The Attempt reduces one ordered mailbox.
-The UI consumes snapshots; it never races raw events.
+Glance is colour and mark. Depth is Magit. Chat is Pimacs. Git is Git.
 
-** 4. Supervision before recovery
+* Essential model
 
-Define child specs, restart policy, shutdown, and failure isolation before
-persisting attempts. Recovery without explicit lifecycle semantics merely
-resurrects ambiguity.
-
-** 5. Journal before intervention
-
-Record a control request before dispatch. Record acknowledgement and outcome
-separately. If Magpi cannot explain what happened, it may not mutate.
-
-** 6. Reconciliation before liveness claims
-
-Streaming events make the view timely. RPC snapshots make it trustworthy. Gaps
-produce stale/read-only state, never guessed state.
-
-** 7. Projection before action
-
-First prove stable read-only sections, point, folding, and visits. Only then bind
-mutating suffixes.
-
-** 8. Steer before terminate
-
-Steer exercises identity and receipts with limited blast radius. Termination adds
-process proof. Replacement adds saga semantics.
-
-** 9. Attention before automation
-
-Derive a quiet, deterministic human queue before adding autonomous policy. Never
-auto-act on a noisy signal.
-
-** 10. One project before federation
-
-One owner, one project, one writer path. Multi-project views and foreign backends
-come last.
-
-* System Shape
-:PROPERTIES:
-:ID: magpi-system
-:TYPE: architecture
-:END:
+Only distinctions which change ownership or user action deserve representation.
 
 #+begin_example
-┌──────────────────────── Emacs ──────────────────────────┐
-│ magpi.el                                                │
-│ sections · transients · point · markers · context draft │
-└────────────────────── JSONL/stdin ──────────────────────┘
-                              │
-┌────────────────────── Elixir/OTP ───────────────────────┐
-│ Magpi.Application                                      │
-│ Registry · Journal · DynamicSupervisor · Attention      │
-│ Attempt GenServers · policy · receipts · reconciliation │
-└────────────────────────── Ports ─────────────────────────┘
-                              │
-             ┌────────────────┼────────────────┐
-             ▼                ▼                ▼
-       pi --mode rpc    pi --mode rpc    pi --mode rpc
+Intention(id, objective, bindings[], change?, state, action_ids, writer_lease?, audit)
+Change(source_root, worktree_path, branch, base_ref)   ; values, not a record
+Action(id, intention_id?, prompt, launch, observation, chat_ref?, started_at)
+Launch(root, requested_model?, thinking, role, context)
+Observation(title?, activity?, connection?, running_model?, files?, last?, problem?, asks[])
+Ask(id, question, state, paths?, parent_id?)           ; inside observation
 #+end_example
 
-Emacs never supervises Pi directly. Elixir never owns live Emacs markers. Pi
-never becomes the orchestration database.
+An intention is one authored objective. Bindings are context, never silently a
+prompt. It gains one managed Git change only when its first action starts. An
+action is one execution and never inherits the objective as its prompt. Retry is
+another id. A standalone action may run in the current checkout without an
+intention.
 
-* OTP Topology
-:PROPERTIES:
-:ID: magpi-otp
-:TYPE: architecture
-:END:
+Do not extract a Workspace. While one intention has one worktree, Change stays
+fields on the intention.
 
-#+begin_example
-Magpi.Supervisor                         :one_for_one
-├─ Magpi.Registry                       :permanent
-├─ Magpi.Journal                        :permanent
-├─ Magpi.Attention                      :transient
-├─ Magpi.AttemptSupervisor              DynamicSupervisor
-│  ├─ Magpi.Attempt <id>                :temporary
-│  └─ Magpi.Attempt <id>                :temporary
-└─ Magpi.GatewaySupervisor              :one_for_one
-   └─ Magpi.Gateway.Stdio               :transient
-#+end_example
+* Invariants
 
-** Supervisor policy
+1. *One intention, one change once work starts.*
+2. *Objective is not a prompt.* Only the action prompt and explicitly bound
+   context enter chat.
+3. *Action identity precedes spawn.* Retry creates another id.
+4. *One writer.* The writer role takes the lease before spawn. Readers do not.
+5. *Uncertainty stays visible.* Disconnect cannot release a lease or claim
+   completion. Writer release is operator recovery, not a fence.
+6. *Git tells Git facts.* Missing is missing, not clean or zero.
+7. *Observation is not permission.* Titles, activity, paths, and rendered text
+   never become identity or intent.
+8. *Read before write.* Navigation never mutates. React is explicit and confirmed.
+9. *Action exit does not decide the why.* Only the user merges or discards.
+10. *One owner for now.* One controlling Emacs. The repository file is not a
+    distributed lock.
 
-| Child | Restart | Reason |
-|-------+---------+--------|
-| Registry | permanent | Infrastructure identity |
-| Journal | permanent | Durable single writer |
-| Attention projector | transient | Reconstructible derivative |
-| Gateway | transient | Client transport |
-| Pi attempt | temporary | Re-execution may duplicate effects |
+* Ownership
 
-Default strategy is =:one_for_one=. Child failure does not kill siblings, parent,
-or descendants. Cascades are explicit controls, never links hidden in topology.
+| Concern | Owner |
+|---------+-------|
+| Why, bindings, change, lease, Git mutations | Magpi Lisp |
+| Point, buffers, sections, Transients | Emacs |
+| Diff, stage, commit, history | Git and Magit |
+| Chat, Pi protocol, session rendering | Pimacs and Pi |
+| Durable process supervision | Deferred |
 
-Restart intensity and exponential backoff apply only to infrastructure. Repeated
-infrastructure failure closes admission and opens attention; it does not churn Pi
-attempts.
-
-** Attempt process
-
-=Magpi.Attempt= is a GenServer and subprocess owner.
-
-Responsibilities:
-
-- validate and hold the immutable child spec;
-- start one Pi RPC subprocess;
-- frame and decode JSONL;
-- serialize events and controls;
-- expose a materialized snapshot;
-- monitor process exit;
-- write lifecycle facts through the Journal;
-- produce parent handoff and terminal evidence.
-
-Long-lived attempts are not Tasks. =Task.Supervisor= is reserved for bounded
-validation or artifact work.
-
-** Monitor semantics
-
-The external process is monitored, not semantically linked to family members.
-Its exit is a fact:
+One adapter, =magpi-pimacs-backend.el=, holds Pimacs-private knowledge. Magpi sees:
 
 #+begin_example
-{:process_exit, attempt_id, generation, exit_status}
-#+end_example
-
-Exit does not imply rollback, mission failure, or safe replacement. Filesystem
-state is reconciled before another writer begins.
-
-** Let it crash
-
-Let corrupt infrastructure fail, preserve the fact, and rebuild reconstructible
-state. Never translate “let it crash” into “rerun the model.”
-
-* Domain State Machines
-:PROPERTIES:
-:ID: magpi-state-machines
-:TYPE: behaviour
-:END:
-
-** Attempt
-
-#+begin_example
-declared → starting → running → settling → terminal
-                  ↘ failed ───────────────↗
-#+end_example
-
-Terminal outcome is one of:
-
-| Outcome | Meaning |
-|---------+---------|
-| completed | Pi settled normally |
-| failed | Provider, protocol, or startup failure |
-| terminated | Operator completed termination |
-| lost | Ownership/process truth cannot be established |
-
-=lost= is read-only until reconciliation. Recovery creates a new attempt, never a
-new meaning for the old ID.
-
-** Control
-
-#+begin_example
-created → accepted | rejected
-accepted → dispatched → succeeded | partial | failed | outcome_unknown
-#+end_example
-
-Delivery, operation completion, process exit, and mission success remain distinct
-facts.
-
-** Attention
-
-#+begin_example
-open → acknowledged-until-change | snoozed → open | resolved
-#+end_example
-
-Priority:
-
-1. explicit human request;
-2. blocking failure or conflict;
-3. stale/advisory observation.
-
-Attention deduplicates by source identity and reason. “Paused,” “old,” or “not
-green” is not sufficient.
-
-* Context Capsules
-:PROPERTIES:
-:ID: magpi-context
-:TYPE: protocol
-:END:
-
-Emacs drafts context because it owns point and buffers. Dispatch freezes it:
-
-#+begin_example
-ContextCapsule {
-  id
-  objective
-  selected_parent_entries[]
-  decisions[]
-  anchors[]
-  file_excerpts[]
-  constraints[]
-  non_goals[]
-  role_instructions
-  expected_output
-  acceptance
-  provenance: {parent_session_id, parent_entry_id, captured_at}
-}
-#+end_example
-
-Rules:
-
-- Full transcript inheritance is opt-in.
-- Each excerpt records path, range, digest, and capture time.
-- Live markers remain Emacs-local; durable fallback is file/range/digest.
-- Capsules are size-bounded and inspectable before launch.
-- Missing context is reported; it is not silently replaced by broad inheritance.
-
-* Internal Protocol
-:PROPERTIES:
-:ID: magpi-protocol
-:TYPE: protocol
-:END:
-
-Emacs ↔ Magpi begins as strict UTF-8 JSONL over stdio. Pi RPC remains unchanged.
-
-** Envelope
-
-#+begin_example
-{id, version: 1, type, payload}
-#+end_example
-
-Replies preserve =id=. Events carry =event_id=, =journal_revision=, and source
-identity.
-
-** Core requests
-
-#+begin_example
-hello
-snapshot
-spawn
-control
-ack_attention
-snooze_attention
-visit_metadata
-shutdown
-#+end_example
-
-** Core events
-
-#+begin_example
-attempt_declared
-attempt_started
-rpc_event
-attention_opened
-control_receipt
-attempt_terminal
-parent_handoff
-snapshot_invalidated
-#+end_example
-
-`attempt_started' in this future OTP protocol means durable attempt/process
-creation only. The Lean Pimacs adapter does not infer it from Pi =agent_start= or
-=turn_start=; those are normalized as semantic activity observations.
-
-** Launch
-
-#+begin_example
-{
-  type: "spawn",
-  child_spec: {...},
-  context_capsule: {...},
-  expected_registry_revision
-}
-#+end_example
-
-The journal records =attempt_declared= before subprocess spawn.
-
-** Control
-
-#+begin_example
-{
-  type: "control",
-  request_id,
-  attempt_id,
-  expected_generation,
-  expected_revision,
-  action: "steer" | "follow_up" | "interrupt" | "terminate" | "replace",
-  input,
-  anchor_id
-}
-#+end_example
-
-** Receipt
-
-#+begin_example
-ControlReceipt {
-  request_id
-  attempt_id
-  generation
-  action
-  request_status
-  operation_status
-  delivery?
-  created_at
-  accepted_at?
-  completed_at?
-  process_exit?
-  error?
-  recovery[]
-}
-#+end_example
-
-A late authoritative event may resolve =outcome_unknown= while retaining the
-period of uncertainty.
-
-* Journal and Recovery
-:PROPERTIES:
-:ID: magpi-journal
-:TYPE: architecture
-:END:
-
-The Journal is a single writer of bounded append-only facts. It is not a dump of
-transcripts.
-
-Persist:
-
-- attempt declaration and lineage;
-- process generation and terminal fact;
-- control request and receipt transitions;
-- mission/acceptance decisions;
-- attention transitions;
-- artifact references and digests;
-- parent handoffs.
-
-Do not persist:
-
-- live Emacs markers;
-- replayable capability handles;
-- full provider streams;
-- secrets;
-- large artifacts already owned elsewhere.
-
-On restart, replay produces a read-only snapshot. Live ownership must be proven
-before controls re-enable.
-
-Journal health is an admission gate. If durable append fails, new launches and
-controls reject; existing attempts continue under monitoring and become stale
-until reconciliation. Magpi never performs an external mutation it cannot first
-record.
-
-Initial storage is project-scoped JSONL plus periodic compact snapshot. A database
-is not justified until query or contention proves the need.
-
-* Emacs Frontend
-:PROPERTIES:
-:ID: magpi-emacs
-:TYPE: architecture
-:END:
-
-Emacs is a first-class frontend, not a dumb shim.
-
-Responsibilities:
-
-- start/connect to Magpi core;
-- draft and preview capsules;
-- preserve live anchors;
-- render Attention, Mission, Attempts, and History;
-- resolve semantic target at point;
-- construct contextual Transients;
-- show receipts and stale state;
-- visit transcripts, files, patches, and artifacts.
-
-Pimacs contributes chat rendering, Markdown, diffs, session affordances, and Pi
-semantics. Magpi must isolate Pimacs private calls behind one compatibility
-module. Long term, Pimacs should accept a transport abstraction so Magpi can
-proxy an Elixir-owned Pi session into a Pimacs chat buffer.
-
-Magpi's =magpi-status.el= composes =magit-mode='s transactional refresh (stable
-point, folding, and window position) with Magit Section's typed sections.
-Transient supplies intent previews. Rendered text is never parsed to recover
-identity.
-
-* Source Layout
-:PROPERTIES:
-:ID: magpi-layout
-:TYPE: plan
-:END:
-
-#+begin_example
-magpi/
-├─ mix.exs
-├─ lib/magpi/
-│  ├─ application.ex
-│  ├─ supervisor.ex
-│  ├─ registry.ex
-│  ├─ journal.ex
-│  ├─ attempt_supervisor.ex
-│  ├─ attempt.ex
-│  ├─ child_spec.ex
-│  ├─ context_capsule.ex
-│  ├─ attention.ex
-│  ├─ domain/
-│  │  ├─ event.ex
-│  │  ├─ snapshot.ex
-│  │  └─ receipt.ex
-│  ├─ gateway/
-│  │  ├─ codec.ex
-│  │  └─ stdio.ex
-│  └─ pi/
-│     ├─ command.ex
-│     └─ rpc.ex
-├─ test/
-│  ├─ support/fake_pi.exs
-│  └─ ...
-└─ emacs/
-   ├─ magpi.el
-   ├─ magpi-backend.el      # stable runtime contract
-   ├─ magpi-pimacs-backend.el # Lean Cut compatibility adapter
-   ├─ magpi-connection.el
-   ├─ magpi-context.el
-   ├─ magpi-launch.el        # frozen launch specification
-   ├─ magpi-section.el
-   ├─ magpi-status.el        # Magit-mode/Section status projection
-   └─ magpi-transient.el
-#+end_example
-
-Prefer standard OTP and small modules. Add a subprocess dependency only after the
-Port spike proves why bare Ports are insufficient.
-
-* Lean Cut — Walking Skeleton
-:PROPERTIES:
-:ID: magpi-lean-cut
-:TYPE: plan
-:END:
-
-Before committing the full supervisor, realize the interaction once using the
-existing Pimacs multi-session backend. This is a bounded experiential probe, not
-the production runtime.
-
-** User journey
-
-#+begin_example
-state intention
-  → choose a thinking-depth profile
-  → spawn named agent
-  → enter its first-message chat buffer
-  → observe activity and changed-file links
-  → visit a changed file
-  → spawn a second agent
-  → return to Magpi status
-  → TAB each attempt to peek intent, activity, files, and last response
-#+end_example
-
-An authored intention is always the attempt heading. If it is absent, the
-heading is a quiet =◯=. A title is a display observation only: it never fills
-or mutates authored intent and never becomes the heading. Activity never
-replaces an authored intention.
-
-** Status shape
-
-#+begin_example
-MAGPI · project
-
-▼ Refactor token refresh                    running · Standard · anthropic/claude-sonnet
-    intent     Make refresh handling explicit and tested
-    model      anthropic/claude-sonnet
-    usage      ↑50.0k ↓10.0k R40.0k · ctx 60.0k/200.0k · $0.45
-    activity   edit lib/auth/token.ex
-    files      lib/auth/token.ex
-    last       Added refresh validation; running focused tests…
-
-▶ Review telemetry simplification              idle · Deep · openai/gpt-4.1
-#+end_example
-
-=TAB= reveals; =RET= visits the attempt chat or file at point; =s= spawns; =g=
-refreshes; one global command returns to this buffer.
-
-** Launch transient
-
-Primary choices:
-
-| Choice | Default | Meaning |
-|--------+---------+---------|
-| Intention | optional | Immutable authored heading; =◯= when absent. Title is never heading identity |
-| Model | Inherit | Canonical =provider/model= id, or Inherit (=requested-model= nil) |
-| Effort | Profile | Thinking depth; Profile defers to the named profile |
-| Profile | Standard | Named effort preset (Default/Quick/Standard/Deep and Off..Max) |
-| Context | Point | None, point, region, selected files |
-| Authority | Writer | Read-only or writer |
-
-Dispatch freezes thinking from Effort (or Profile when Effort is Profile), plus
-semantic authority and context. Requested and running model values share the same
-opaque canonical identifier; only the adapter decodes provider/model transport
-arguments. Status applies a face hierarchy so identity, activity, authority, and
-evidence scan at different weights. Launch atomically installs the listener
-and may emit initial state observations. `send-initial' is a separate backend
-operation, invoked only after that listener is ready; it compiles and sends the
-initial prompt at most once. Model enumeration is asynchronous and session-scoped
-on an explicit handle; any change records a running-model observation. Status
-refresh paints the registry; it does not pull snapshots. `g` (and one open-time
-call) reconcile transport-only facts. Restated facts keep the same attempt object
-and do not schedule another paint. Point/Region context is source-file evidence;
-Magpi and Pimacs buffers default to None so porcelain cannot re-enter the prompt.
-
-The Lean Cut domain has three plain records only:
-
-#+begin_example
-Attempt(id, intent, launch, observation, started-at)
-Launch(root, profile, requested-model, thinking, authority, context)
-Observation(display-title, activity-state, connection-state, running-model,
-            observed-files, last-response, problem, usage)
-#+end_example
-
-The reducer is a plain function: =attempt-reduce(attempt, event) -> new-attempt=.
-The registry replaces the value by attempt ID; backend listeners do not retain a
-mutable attempt object.
-
-** Lean backend
-
-Use Pimacs’s existing named chats and standard Pi RPC events. The implemented
-=magpi-backend.el= contract is the only runtime surface used by =magpi.el=;
-=magpi-pimacs-backend.el= is the sole consumer of Pimacs private APIs.
-
-#+begin_example
-spawn(attempt, listener) send-initial(handle, attempt) visit(handle)
+spawn(action, listener)
+send_initial(handle, action)
+visit(handle)
 send(handle, message, mode)
 terminate(handle)
+reconcile(handle, listener)
+respond_ask(handle, ask_id, response)   ; when the adapter can
 #+end_example
 
-The first backend is ephemeral and Emacs-owned. The later Elixir backend
-implements the same semantic contract. UI code may not reach through the boundary
-into Pimacs hash tables.
+A seam around present dependency, not a backend platform.
 
-Pimacs session names are adapter transport identities. They include the complete
-attempt ID (with a concise intent prefix) so attempts at the same root cannot
-collide through presentation truncation.
+* Interaction
 
-** Changed-file evidence
+Status is an intention dashboard, not a process inventory. The heading is why
+plus a Git glance. Nested rows are actions and their observations. A pending
+reaction is a mark, not a lecture.
 
-For the cut, show only files observed in structured =edit= or =write= tool calls.
-Label them =observed files=; do not claim a complete worktree diff. =RET= opens
-the exact path. Git reconciliation belongs after the journey proves useful.
+| Key | Meaning |
+|-----+---------|
+| =i= | Create an intention |
+| =@= | Bind context to the surface at point |
+| =C-c m i= / =C-c m @= | Create or bind outside status |
+| =s= | Spawn an action; keep the intention at point |
+| =RET= | Intention → Magit; action → chat; ask → React |
+| =TAB= | Fold |
+| =g= | Reconcile observations and repaint |
+| =m= / =d= / =l= / =c= | Magit status, diff, log, commit of the changes |
+| =a= | React |
+| =q= | Quit |
 
-** What survives the probe
+=s= is spawn in Magpi status and stage in Magit. Distinct modes, not a collision.
 
-Keep:
+Launch defaults to =w= (writer). Press =w= to toggle =r= (reader).
 
-- immutable attempt ID and authored intention or explicit absence;
-- launch specification and profile resolution;
-- backend protocol;
-- status sections and navigation grammar;
-- event reduction tests;
-- context anchors.
+- On an intention, =s= starts an action in its worktree.
+- Elsewhere, =s= starts a standalone action in the current checkout.
+- Creating an intention only persists why and bindings; the first action
+  creates the worktree.
+- Point may default; it never silently changes ownership.
 
-Expect to replace:
+Bind is contextual. Intention holds durable why-references. Action may hold this
+doing's evidence. Launch may freeze point or region into the spawn. Porcelain
+buffers are not source.
 
-- ephemeral process registry;
-- Pimacs-private process ownership;
-- in-memory lifecycle history.
+React is the intervention surface:
 
-** Lean gate
+- Pi-ask → approve / reject
+- Intention with writer → release (honest recovery)
+- Intention quiescent → merge / discard
+- Action disconnected → show uncertainty; do not fake completion
 
-The cut passes when one user can, without reading documentation:
+* Persistence
 
-1. state an intention and choose a thinking-depth profile;
-2. land in the child’s first-message buffer;
-3. return to status and still see the original intention;
-4. jump to an observed changed file;
-5. spawn a second independent agent;
-6. fold/peek both attempts without confusing their state or target.
+Beside Git metadata, persist only what must survive a buffer:
 
-No mission editor, daemon, journal, worktree manager, automatic attention, or
-foreign backend enters this cut. If this journey is not compelling, stop before
-building the supervisor.
+- intention id, objective, bindings, change identity, state, action membership
+- writer lease
+- stable chat references when the adapter can supply them
+- a narrow audit of worktree, lease, merge, discard, and cleanup (object ids
+  when Git mutations complete)
 
-* Build Phases
-:PROPERTIES:
-:ID: magpi-phases
-:TYPE: plan
-:END:
+Git owns history. Pimacs owns chat. Files own contents. No transcript store,
+database, journal, or daemon in anticipation.
 
-The next phase begins only after its predecessor’s gate passes.
+States: =active=, =merged=, =discarded=. Richer states only with a user
+operation that needs them.
 
-** Phase 0 — Contract and fake
-:PROPERTIES:
-:ID: magpi-phase-0
-:END:
+* Build order
 
-Goal: make semantics executable without Pi, providers, or Emacs.
+Each step must improve the loop on its own.
 
-Build:
+** 1. Close one intention loop
 
-- nouns and structs;
-- attempt/control state machines;
-- protocol codec;
-- deterministic fake Pi executable;
-- invariant tests.
+Create, bind, spawn, edit in the worktree, return, inspect through Magit, React
+(release, then merge or discard).
 
-Gate:
+Gate: the journey works without evaluating Lisp.
 
-- invalid transitions reject;
-- IDs are minted before spawn;
-- duplicate request/event IDs are idempotent;
-- fixtures are deterministic and credential-free.
+** 2. Make return effortless
 
-Do not build: UI, mission editing, worktrees, real provider calls.
+Preserve point and folding. Visit chats and observed files. Distinguish observed
+files from the Git diff. Persist enough to reopen prior action chats.
 
-** Phase 1 — Supervision kernel
-:PROPERTIES:
-:ID: magpi-phase-1
-:END:
+Gate: the user can always return from doing or evidence to its intention.
 
-Goal: prove OTP ownership and failure containment.
+** 3. Make uncertainty honest
 
-Build:
+Partial spawn, stale observation, missing worktree, writer recovery, failed
+merge or discard — no invented success.
 
-- Application/Supervisor;
-- Registry;
-- DynamicSupervisor;
-- temporary Attempt worker;
-- fake subprocess ownership;
-- monitor/exit handling;
-- restart intensity for infrastructure.
+Gate: interruption cannot silently free ownership.
 
-Gate:
+** 4. Observe real use
 
-- attempt crash does not restart or affect siblings;
-- infrastructure follows declared restart policy;
-- no callback writes another process’s state;
-- graceful and abnormal exit become deterministic facts.
+Wrong-target actions, time to Git evidence, manual reconstruction, stale
+leases, work lost on Emacs exit. Remove friction before adding architecture.
 
-Do not build: persistence or real Pi.
+** 5. Decide whether a runtime is earned
 
-** Phase 2 — Journal and reconstruction
-:PROPERTIES:
-:ID: magpi-phase-2
-:END:
+Only if Emacs/Pimacs fails the loop: survive Emacs exit; process ownership
+Pimacs cannot provide; multiple clients; recovery beyond the audit; recurrent
+harm.
 
-Goal: explain every lifecycle transition and rebuild state.
+First prove one external owner, one reconnect, one rejected stale control. If
+that proof removes no observed limitation, do not integrate. If earned, it owns
+only runtime facts — not markers, Magit, intention, or chat.
 
-Build:
+* Deliberately absent
 
-- append-only journal;
-- materialized snapshot;
-- control receipt transitions;
-- replay/reconstruction;
-- redaction and bounds.
-
-Gate:
-
-- kill/restart core and reconstruct the same terminal snapshot;
-- pending controls become =outcome_unknown=;
-- replay never enables control without live ownership proof.
-
-Do not build: broad querying or database storage.
-
-** Phase 3 — Emacs gateway
-:PROPERTIES:
-:ID: magpi-phase-3
-:END:
-
-Goal: prove a thin, strict Emacs ↔ Elixir connection.
-
-Build:
-
-- stdio JSONL gateway;
-- =magpi-connection.el=;
-- hello/version/snapshot/spawn/shutdown;
-- bounded request correlation;
-- reconnect-to-snapshot within one core lifetime.
-
-Gate:
-
-- split UTF-8 and multiple frames decode correctly;
-- dead buffers and late replies are harmless;
-- malformed input cannot mutate state;
-- Emacs displays a fake-attempt snapshot.
-
-Do not build: Magit UI or mutations.
-
-** Phase 4 — One real Pi attempt
-:PROPERTIES:
-:ID: magpi-phase-4
-:END:
-
-Goal: supervise one real =pi --mode rpc= process.
-
-Build:
-
-- Pi command builder;
-- subprocess spike: bare Port versus a focused library;
-- separate protocol stdout from stderr;
-- context capsule launch;
-- RPC prompt/state/events;
-- terminal handoff.
-
-Gate:
-
-- launch from a bounded capsule;
-- observe streaming/tool/settled events;
-- terminate and observe process proof;
-- no provider text is parsed as control state;
-- failed startup leaves an attributable attempt.
-
-Do not build: more than one writer.
-
-** Phase 5 — Read-only porcelain
-:PROPERTIES:
-:ID: magpi-phase-5
-:END:
-
-Goal: make state tractable before making it mutable.
-
-Build:
-
-- Attention, Attempts, and History sections;
-- stable point, folding, window start;
-- transcript/file/artifact visits;
-- stale and disconnected rendering;
-- projection switch/back.
-
-Gate:
-
-- refresh preserves semantic location;
-- deletion/reordering has deterministic fallback;
-- =RET= only inspects;
-- no command parses rendered text.
-
-Do not build: lifecycle mutation.
-
-** Phase 6 — Exact intervention
-:PROPERTIES:
-:ID: magpi-phase-6
-:END:
-
-Goal: prove contextual control against one owned attempt.
-
-Build in this order:
-
-1. steer;
-2. follow-up;
-3. interrupt current turn;
-4. graceful terminate;
-5. forced termination after timeout;
-6. replacement as a linked attempt.
-
-Gate:
-
-- every control checks attempt/generation/revision;
-- every control has a receipt;
-- delivery, operation, and process proof remain distinct;
-- stale targets reject rather than retarget.
-
-Do not build: autonomous retry.
-
-** Phase 7 — Attention
-:PROPERTIES:
-:ID: magpi-phase-7
-:END:
-
-Goal: create a quiet operator inbox from trusted facts.
-
-Build:
-
-- explicit, blocking, advisory buckets;
-- source-bound deduplication;
-- expected actor/role;
-- acknowledge-until-change;
-- snooze;
-- typed request/response schema.
-
-Gate:
-
-- routine active work does not alert;
-- acknowledgement expires only on source change;
-- every item visits its source;
-- attention never mutates lifecycle.
-
-Do not build: automatic response.
-
-** Phase 8 — Mission and acceptance
-:PROPERTIES:
-:ID: magpi-phase-8
-:END:
-
-Goal: join authored intent to attempts and evidence.
-
-Build:
-
-- mission/intention records as collapsible status headers;
-- acceptance requirements;
-- decisions and next action;
-- attempt attachment/lineage (membership and provenance, not git forks);
-- verification evidence;
-- close intent semantics (refuse new attaches);
-- workspace remains the project root unless Phase 9 exists.
-
-Gate:
-
-- author → launch → attend → inspect evidence → decide → close;
-- absent intent remains absent;
-- process completion never auto-closes a mission;
-- intention headers group attempts without creating worktrees.
-
-Normative detail: [[file:INTENTION-WORKSPACE.org][INTENTION-WORKSPACE.org]].
-
-** Phase 9 — Worktrees and one-writer policy
-:PROPERTIES:
-:ID: magpi-phase-9
-:END:
-
-Goal: make mutation containment explicit as a workspace plane, not as mission
-identity.
-
-Build:
-
-- workspace refs on attempts;
-- policies: =shared-root=, =worktree-per-writer=, =inherit-parent=, =explicit=;
-- managed worktree lifecycle;
-- one writer per workspace;
-- dirty-state preservation;
-- replacement preflight and explicit workspace handoff;
-- cleanup receipts;
-- concurrency and budget policy.
-
-Gate:
-
-- conflicting writers reject before launch;
-- failed cleanup preserves recovery paths;
-- replacement cannot begin before prior writer terminal proof;
-- workspace fork and attempt fork remain distinct operations;
-- branch/worktree labels never become intention identity.
-
-Normative detail: [[file:INTENTION-WORKSPACE.org][INTENTION-WORKSPACE.org]].
-
-** Phase 10 — Durable daemon and federation
-:PROPERTIES:
-:ID: magpi-phase-10
-:END:
-
-Goal: outlive one Emacs connection, then scale ownership.
-
-Build in order:
-
-1. daemon lifecycle independent of Emacs;
-2. authenticated local reconnect;
-3. one reconnecting Emacs client;
-4. multiple projects;
-5. optional additional clients;
-6. read-only foreign backend adapters.
-
-Gate:
-
-- UI disconnect does not kill attempts;
-- reconnect obtains a coherent snapshot;
-- owner routing is unambiguous;
-- foreign runs cannot claim unsupported controls.
-
-* Verification Ladder
-:PROPERTIES:
-:ID: magpi-verification
-:TYPE: test-plan
-:END:
-
-1. Pure state-machine tests.
-2. Protocol codec and malformed-frame tests.
-3. Supervisor/Registry ExUnit tests.
-4. Journal replay and crash tests.
-5. Fake subprocess integration.
-6. Real local Pi RPC smoke test without mutation.
-7. ERT connection and section tests.
-8. Exact-target steer end-to-end.
-9. Termination/worktree destructive tests in disposable repositories.
-10. Manual porcelain session with recorded receipts.
-
-A passing exit code is insufficient. Each phase observes its artifact: state,
-journal, process, buffer, or worktree.
-
-* Adversarial Assumption Ledger
-:PROPERTIES:
-:ID: magpi-assumptions
-:TYPE: risk
-:END:
-
-| Assumption | Piercing question | Revisit trigger |
-|------------+-------------------+-----------------|
-| Elixir earns its cost | Does supervision survive UI complexity better than Elisp would? | Phase 3 requires more glue than core logic |
-| Pi RPC is sufficient | Can every owned action be expressed without parsing prose? | First missing exact-target operation |
-| A Port is sufficient | Can stdout/stderr, process trees, and cancellation be cleanly controlled? | Phase 4 spike fails one gate |
-| Journal is enough | Are replay and queries still simple under real use? | Compaction/query latency becomes material |
-| Capsule beats fork | Are failures caused by omitted context? | Repeated context-deficit attention |
-| Attention can stay quiet | Do derived rules produce trusted signal? | Users routinely dismiss without acting |
-| Process ownership is clear | Can a session be adopted without ambiguity? | Durable daemon/reconnect phase |
-| OTP restart is safe for infrastructure | Could restart reorder or lose lifecycle facts? | Journal/gateway crash tests |
-| More agents help | Does delegation improve outcome per cost and attention? | Metrics show coordination drag |
-| Pimacs remains reusable | Can transport be abstracted without invasive coupling? | Phase 5 prototype requires broad private hooks |
-| Lean cut predicts the product | Does the status→chat→file→status loop actually reduce cognitive load? | Lean gate needs explanation or wrong-target recovery |
-
-Assumptions are not settled because they are written. Each has a falsification
-point.
-
-* Deliberately Deferred
-:PROPERTIES:
-:ID: magpi-deferred
-:TYPE: non-goals
-:END:
-
-Until Phase 10:
-
-- BEAM distribution;
-- remote hosts;
-- multiple simultaneous UI writers;
-- Windows support;
-- adoption/control of arbitrary external Pi processes;
-- =pi-subagents= mutation adapter;
-- browser dashboard;
-- autonomous retry/replacement;
-- mission federation;
-- database-backed event sourcing;
-- generalized plugin system.
-
-These are not “edge cases to handle now.” They are separate products or later
-proofs.
-
-* V1 Definition
-:PROPERTIES:
-:ID: magpi-v1
-:TYPE: acceptance
-:END:
-
-V1 is complete when one user can:
-
-1. open Magpi in one project;
-2. freeze point/region into a capsule;
-3. launch one supervised Pi attempt;
-4. inspect live activity and evidence;
-5. steer the exact attempt;
-6. see an acknowledged receipt;
-7. interrupt or terminate it safely;
-8. observe terminal proof;
-9. return to the dispatch anchor;
-10. restart the UI and recover a truthful read-only history.
-
-V1 does not require missions, worktrees, federation, or =pi-subagents= control.
-Those are valuable only after the base is firm.
-
-* Immediate Next Step
-:PROPERTIES:
-:ID: magpi-next
-:TYPE: plan
-:END:
-
-Implement only the Lean Cut.
-
-Start with the backend boundary, immutable attempt record, launch Transient, and
-Magit-backed status buffer over existing named Pimacs chats. Track structured
-=edit=/=write= file paths and support two concurrent attempts.
-
-Do not begin the Elixir skeleton until the lean gate passes. Then freeze the
-learned backend/domain contract and enter Phase 0:
-
-#+begin_example
-mix new magpi --sup
-#+end_example
-
-The walking skeleton validates the experience; Phase 0 makes its semantics firm.
-
-* Prior Sources
-:PROPERTIES:
-:ID: magpi-sources
-:TYPE: reference
-:END:
-
-- OTP supervision: Supervisor, DynamicSupervisor, Registry, GenServer
-- Magit: stable sections, transactional refresh, contextual Transients
-- Gerrit: explicit attention set and turn-taking
-- Temporal: workflow/run identity, Query/Signal/Update, event history
-- Kubernetes: UID/resourceVersion, snapshot/watch, stale rejection
-- Argo: selected-node controls and human gates
-- LangGraph: durable interrupts and response schemas
-- Claude agent teams: direct teammate interaction, with durability cautions
-- Pimacs: Pi RPC/chat rendering and Emacs integration
-- =pi-subagents=: one-writer, worktree, artifact, acceptance, and recovery priors
-- [[file:INTENTION-WORKSPACE.org][INTENTION-WORKSPACE.org]]: intention headers vs attempt lineage vs workspace isolation
+Until evidence demands them: Elixir/OTP daemon; event sourcing; attention
+inbox; workflow graph; retries and automatic approval; multiple worktrees per
+intention; fleet and federation; generic backend platform; Org as runtime state.
+
+* Immediate next step
+
+Finish the ordinary path: attributable writer release, then guarded merge or
+discard, through React. Then use Magpi for real work. No runtime is more
+valuable than learning whether this small loop enlarges intention and preserves
+flow.

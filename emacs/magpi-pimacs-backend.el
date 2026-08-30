@@ -1,12 +1,14 @@
 ;;; magpi-pimacs-backend.el --- Pimacs adapter for Magpi -*- lexical-binding: t; -*-
 
-;; This is the only Magpi module allowed to use Pimacs private APIs.  It is an
-;; ephemeral Lean Cut adapter; its public surface is magpi-backend.el.
+;; One job: compile Magpi semantics to Pimacs and normalize Pimacs facts
+;; back.  This is the only Magpi module allowed to use Pimacs private APIs.
 
 (require 'cl-lib)
+(require 'json)
+(require 'seq)
 (require 'pimacs)
 (require 'magpi-backend)
-(require 'magpi-core)
+(require 'magpi-action)
 (require 'magpi-launch)
 
 (cl-defstruct magpi-pimacs-backend)
@@ -14,21 +16,43 @@
 (cl-defstruct magpi-pimacs-handle
   id chat-buffer cleanup initial-title listener initial-sent)
 
+(defcustom magpi-pimacs-models-store-file
+  (expand-file-name "~/.pi/agent/models-store.json")
+  "Pi on-disk model catalog used when no live session can answer.
+
+Cold launch reads this file so the spawn Model field is not stuck on
+Inherit before the first agent exists.  A live `get_available_models'
+reply still wins and refreshes the cache."
+  :type 'file
+  :group 'magpi)
+
 (defvar magpi-backend (make-magpi-pimacs-backend)
-  "The Lean Cut backend.
+  "The active Magpi adapter.
 
-Later backends replace this value while retaining the `magpi-backend-*'
-contract.")
+Later adapters replace this value while retaining the `magpi-backend-*'
+contract verbs.")
 
-(defun magpi-pimacs--session-name (attempt)
-  "Compile ATTEMPT into an injective Pimacs session identity."
-  (format "%s · %s"
-          (truncate-string-to-width (or (magpi-attempt-intent attempt) "◯")
-                                    42 nil nil "…")
-          (magpi-attempt-id attempt)))
+(defun magpi-pimacs--session-name (action)
+  "Return a unique Pimacs session name for ATTEMPT.
+
+Ungrouped actions must not reuse a chat whose title happens to match the new
+task.  Keep grouped intention chats human-readable while using the action ID
+as the disambiguator for standalone spawns."
+  (let* ((launch (magpi-action-launch action))
+         (context (and launch (magpi-launch-spec-context launch)))
+         (title (or (magpi-action-title action)
+                    (magpi-action-prompt action)
+                    (magpi-launch-context-title context)
+                    "New task"))
+         (intention-id (magpi-action-intention-id action)))
+    (if intention-id
+        (truncate-string-to-width title 60 nil nil "…")
+      (format "%s · %s"
+              (truncate-string-to-width title 42 nil nil "…")
+              (magpi-action-id action)))))
 
 (defun magpi-pimacs--model-identifier (model)
-  "Return MODEL's backend-neutral provider/model identifier, or nil."
+  "Return MODEL's adapter-neutral provider/model identifier, or nil."
   (when (listp model)
     (let ((provider (plist-get model :provider))
           (id (or (plist-get model :id) (plist-get model :modelId))))
@@ -36,6 +60,122 @@ contract.")
                  (not (string-empty-p provider))
                  (not (string-empty-p id)))
         (format "%s/%s" provider id)))))
+
+(defun magpi-pimacs--normalize-models (data)
+  "Return canonical model ids from a get_available_models DATA payload."
+  (when (listp data)
+    (let ((models (plist-get data :models)))
+      (when (vectorp models)
+        (setq models (append models nil)))
+      (when (listp models)
+        (delq nil (mapcar #'magpi-pimacs--model-identifier models))))))
+
+(defun magpi-pimacs--read-models-store (file)
+  "Parse FILE as an alist-keyed models store, or signal."
+  (if (fboundp 'json-parse-file)
+      (json-parse-file file :object-type 'alist :array-type 'list)
+    (let ((json-object-type 'alist)
+          (json-array-type 'list)
+          (json-key-type 'string))
+      (json-read-file file))))
+
+(defun magpi-pimacs--alist-get (key alist)
+  "Return KEY from ALIST whether KEY was parsed as a string or symbol."
+  (or (alist-get key alist nil nil #'equal)
+      (and (stringp key) (alist-get (intern key) alist))))
+
+(defun magpi-pimacs--disk-models (&optional file)
+  "Return canonical provider/model ids from Pi's on-disk models store.
+
+FILE defaults to `magpi-pimacs-models-store-file'.  Returns nil when the
+file is missing, unreadable, or malformed.  This is a cold launch
+catalog only; it does not start an agent."
+  (let ((file (expand-file-name (or file magpi-pimacs-models-store-file))))
+    (when (file-readable-p file)
+      (condition-case nil
+          (let* ((data (magpi-pimacs--read-models-store file))
+                 models)
+            (dolist (provider-entry data)
+              (let* ((provider (car provider-entry))
+                     (provider (if (symbolp provider)
+                                   (symbol-name provider)
+                                 provider))
+                     (meta (cdr provider-entry))
+                     (entries (magpi-pimacs--alist-get "models" meta)))
+                (when (and (stringp provider) (listp entries))
+                  (dolist (model entries)
+                    (let ((id (magpi-pimacs--alist-get "id" model)))
+                      (when (and (stringp id) (not (string-empty-p id)))
+                        (push (format "%s/%s" provider id) models)))))))
+            (nreverse (seq-uniq models)))
+        (error nil)))))
+
+(defun magpi-pimacs--live-chat-at-root (root)
+  "Return a live Pimacs chat buffer at ROOT, or nil."
+  (when root
+    (let ((root (file-truename (file-name-as-directory root))))
+      (seq-find
+       (lambda (buffer)
+         (with-current-buffer buffer
+           (and (derived-mode-p 'pimacs-chat-mode)
+                (ignore-errors
+                  (equal (file-truename
+                          (file-name-as-directory default-directory))
+                         root)))))
+       (buffer-list)))))
+
+(cl-defmethod magpi-backend-chat-candidates ((_backend magpi-pimacs-backend) root)
+  "Return active Pimacs chats at ROOT as durable session references."
+  (let ((root (file-truename (file-name-as-directory root))))
+    (delq
+     nil
+     (mapcar
+      (lambda (buffer)
+        (with-current-buffer buffer
+          (when (and (derived-mode-p 'pimacs-chat-mode)
+                     (ignore-errors
+                       (equal (file-truename
+                               (file-name-as-directory default-directory)) root)))
+            (let* ((state pimacs--header-line-state)
+                   (session (plist-get state :sessionStats))
+                   (id (plist-get session :sessionId))
+                   (title (or (plist-get state :sessionName) (buffer-name buffer))))
+              (list :reference (concat "pimacs:" (or id (buffer-name buffer)))
+                    :label title)))))
+      (buffer-list)))))
+(defun magpi-pimacs--catalog-chat (handle root)
+  "Return the chat buffer to query for a model catalog."
+  (or (and handle (magpi-pimacs-handle-p handle)
+           (magpi-pimacs-handle-chat-buffer handle))
+      (magpi-pimacs--live-chat-at-root root)))
+
+(defun magpi-pimacs-fill-catalog (root &optional handle)
+  "Fill the launch catalog from a live session or the on-disk store.
+
+Never waits.  A live RPC stores the catalog when the reply arrives.
+A disk read stores it immediately.  Returns the cached models, if any."
+  (let ((chat (magpi-pimacs--catalog-chat handle root))
+        issued)
+    (when (buffer-live-p chat)
+      (with-current-buffer chat
+        (when (ignore-errors (pimacs--current-agent))
+          (condition-case nil
+              (progn
+                (pimacs--send-command
+                 "get_available_models" '()
+                 (lambda (response)
+                   (when (pimacs--response-success-p response)
+                     (when-let ((models (magpi-pimacs--normalize-models
+                                         (plist-get response :data))))
+                       (magpi-launch-store-catalog root models)))))
+                (setq issued t))
+            (error nil)))))
+    (unless issued
+      (when-let ((models (magpi-pimacs--disk-models)))
+        (magpi-launch-store-catalog root models)))
+    (magpi-launch-cached-models root)))
+
+(setq magpi-launch-catalog-refresh-function #'magpi-pimacs-fill-catalog)
 
 (defun magpi-pimacs--model-components (identifier)
   "Decode the canonical semantic provider/model IDENTIFIER."
@@ -54,24 +194,22 @@ contract.")
          (user-error "Unknown Pimacs model identifier: %s" model)))
      (when-let ((thinking (magpi-launch-spec-thinking spec)))
        (list "--thinking" (symbol-name thinking)))
-     (pcase (magpi-launch-spec-authority spec)
-       ('read-only '("--tools" "read,grep,find,ls"))
+     (pcase (magpi-launch-spec-role spec)
+       ('reader '("--tools" "read,grep,find,ls"))
        ('writer nil)
-       (_ (user-error "Unknown Magpi authority: %S"
-                      (magpi-launch-spec-authority spec)))))))
+       (_ (user-error "Unknown Magpi role: %S"
+                      (magpi-launch-spec-role spec)))))))
 
-(defun magpi-pimacs--initial-prompt (attempt)
-  "Compile ATTEMPT intent and frozen source context into one initial prompt.
+(defun magpi-pimacs--initial-prompt (action)
+  "Compile ATTEMPT's task prompt and frozen source context.
 
-Authority and model are transport flags, not prompt text.  Restating them here
-would give the model a second encoding of the same policy and look like a new
-instruction on any accidental re-send."
-  (when-let ((intent (magpi-attempt-intent attempt)))
-    (let ((context (magpi-launch-spec-context (magpi-attempt-launch attempt))))
+Authority, model, and intention identity are not prompt text."
+  (when-let ((prompt (magpi-action-prompt action)))
+    (let ((context (magpi-launch-spec-context (magpi-action-launch action))))
       (if (eq (plist-get context :kind) 'none)
-          intent
+          prompt
         (concat
-         intent
+         prompt
          (format "\n\nContext captured at dispatch:\n- %s%s%s"
                  (or (plist-get context :file) "buffer")
                  (if-let ((line (plist-get context :line)))
@@ -104,6 +242,17 @@ instruction on any accidental re-send."
                   (equal relative ".."))
         relative))))
 
+(defun magpi-pimacs--normalize-ask (payload)
+  "Translate a transport approval/ask PAYLOAD into a Magpi `:ask' plist."
+  (let ((data (or (plist-get payload :approval) (plist-get payload :ask) payload)))
+    (list :id (plist-get data :id)
+          :parent-id (plist-get data :parent-id)
+          :requester (plist-get data :requester)
+          :question (or (plist-get data :question) (plist-get data :ask))
+          :detail (plist-get data :detail)
+          :state (plist-get data :state)
+          :affected-paths (plist-get data :affected-paths))))
+
 (defun magpi-pimacs--normalize-events (event)
   "Translate raw Pimacs EVENT into zero or more semantic event plists."
   (pcase (plist-get event :type)
@@ -124,10 +273,15 @@ instruction on any accidental re-send."
      (list '(:type activity-ended)))
     ("message_end"
      (let ((message (plist-get event :message)))
-       (when (equal (plist-get message :role) "assistant")
+       (cond
+        ((equal (plist-get message :role) "assistant")
          (list (list :type 'response-observed
                      :text (magpi-pimacs--content-text
-                            (plist-get message :content)))))))
+                            (plist-get message :content)))))
+        ((equal (plist-get message :role) "user")
+         (list (list :type 'prompt-observed
+                     :prompt (magpi-pimacs--content-text
+                              (plist-get message :content))))))))
     ("extension_ui_request"
      (when (equal (plist-get event :method) "setTitle")
        (list (list :type 'title-observed :title (plist-get event :title)))))
@@ -141,62 +295,14 @@ instruction on any accidental re-send."
     ("auto_retry_start"
      (list '(:type activity-started :activity "retrying")))
     ("auto_retry_end"
-     (list '(:type activity-started :activity "thinking")))))
-
-(defun magpi-pimacs--json-number (value)
-  "Return VALUE when it is a finite number; treat json-null as absent."
-  (and (numberp value) value))
-
-(defun magpi-pimacs--normalize-usage (data)
-  "Translate get_session_stats DATA into a backend-neutral usage plist.
-
-Returns nil when DATA carries no usable token, cost, or context facts."
-  (when (listp data)
-    (let* ((tokens (plist-get data :tokens))
-           (context (plist-get data :contextUsage))
-           (tokens (and (listp tokens) tokens))
-           (context (and (listp context) context))
-           (usage
-            (list :input (magpi-pimacs--json-number
-                          (and tokens (plist-get tokens :input)))
-                  :output (magpi-pimacs--json-number
-                           (and tokens (plist-get tokens :output)))
-                  :cache-read (magpi-pimacs--json-number
-                               (and tokens (plist-get tokens :cacheRead)))
-                  :cache-write (magpi-pimacs--json-number
-                                (and tokens (plist-get tokens :cacheWrite)))
-                  :total (magpi-pimacs--json-number
-                          (and tokens (plist-get tokens :total)))
-                  :cost (magpi-pimacs--json-number (plist-get data :cost))
-                  :context-tokens (magpi-pimacs--json-number
-                                   (and context (plist-get context :tokens)))
-                  :context-window (magpi-pimacs--json-number
-                                   (and context
-                                        (plist-get context :contextWindow)))
-                  :context-percent (magpi-pimacs--json-number
-                                    (and context
-                                         (plist-get context :percent))))))
-      (when (cl-some #'numberp
-                     (list (plist-get usage :input)
-                           (plist-get usage :output)
-                           (plist-get usage :cache-read)
-                           (plist-get usage :cache-write)
-                           (plist-get usage :total)
-                           (plist-get usage :cost)
-                           (plist-get usage :context-tokens)
-                           (plist-get usage :context-window)
-                           (plist-get usage :context-percent)))
-        usage))))
-
-(defun magpi-pimacs--request-usage (listener)
-  "Reconcile session token usage into a usage-observed event."
-  (pimacs--send-command
-   "get_session_stats" '()
-   (lambda (response)
-     (when (pimacs--response-success-p response)
-       (when-let ((usage (magpi-pimacs--normalize-usage
-                          (plist-get response :data))))
-         (funcall listener (list :type 'usage-observed :usage usage)))))))
+     (list '(:type activity-started :activity "thinking")))
+    ;; Pi may say "approval"; Magpi only receives ask-* events.
+    ((or "approval_requested" "ask_requested")
+     (list (list :type 'ask-requested :ask (magpi-pimacs--normalize-ask event))))
+    ((or "approval_updated" "ask_updated")
+     (list (list :type 'ask-updated :ask (magpi-pimacs--normalize-ask event))))
+    ((or "approval_resolved" "ask_resolved")
+     (list (list :type 'ask-resolved :ask (magpi-pimacs--normalize-ask event))))))
 
 (defun magpi-pimacs--request-state (handle listener)
   "Reconcile Pimacs state into title and running-model observations."
@@ -212,19 +318,14 @@ Returns nil when DATA carries no usable token, cost, or context facts."
                             (plist-get data :model))))
            (funcall listener (list :type 'model-observed :model model))))))))
 
-(defun magpi-pimacs--request-observations (handle listener)
-  "Snapshot transport-only facts: title, model, and session usage."
-  (magpi-pimacs--request-state handle listener)
-  (magpi-pimacs--request-usage listener))
-
-(cl-defmethod magpi-backend-spawn ((_backend magpi-pimacs-backend) attempt listener)
-  (let* ((spec (magpi-attempt-launch attempt))
-         (session-name (magpi-pimacs--session-name attempt))
+(cl-defmethod magpi-backend-spawn ((_backend magpi-pimacs-backend) action listener)
+  (let* ((spec (magpi-action-launch action))
+         (session-name (magpi-pimacs--session-name action))
          (pimacs-flags (append pimacs-flags (magpi-pimacs--flags spec))))
     (pimacs-chat session-name (magpi-launch-spec-root spec))
     (let* ((chat (current-buffer))
            (handle (make-magpi-pimacs-handle
-                    :id (magpi-attempt-id attempt)
+                    :id (magpi-action-id action)
                     :chat-buffer chat
                     :initial-title session-name
                     :listener listener)))
@@ -233,12 +334,7 @@ Returns nil when DATA carries no usable token, cost, or context facts."
          t (magpi-pimacs-handle-id handle)
          (lambda (event)
            (dolist (normalized (magpi-pimacs--normalize-events event))
-             (funcall listener normalized))
-           ;; Session totals only advance after a settle; pull them then so the
-           ;; status buffer stays current without requiring an explicit `g'.
-           (when (equal (plist-get event :type) "agent_settled")
-             (magpi-pimacs--request-usage listener))))
-        (magpi-pimacs--request-observations handle listener)
+             (funcall listener normalized))))
         (when-let ((agent (pimacs--current-agent)))
           (let ((cleanup (lambda ()
                            (funcall listener '(:type disconnected)))))
@@ -246,17 +342,17 @@ Returns nil when DATA carries no usable token, cost, or context facts."
             (pimacs--agent-add-cleanup agent cleanup))))
       handle)))
 
-(cl-defmethod magpi-backend-send-initial ((_backend magpi-pimacs-backend) handle attempt)
+(cl-defmethod magpi-backend-send-initial ((_backend magpi-pimacs-backend) handle action)
   (unless (magpi-pimacs-handle-initial-sent handle)
     (let ((chat (magpi-pimacs-handle-chat-buffer handle)))
       (unless (buffer-live-p chat)
         (user-error "Attempt %s has no live chat buffer"
                     (magpi-pimacs-handle-id handle)))
-      ;; Record the attempt before delivery so a transport error cannot restate
-      ;; the same instruction.  Retry is a new attempt, never a second send.
+      ;; Record the action before delivery so a transport error cannot restate
+      ;; the same instruction.  Retry is a new action, never a second send.
       (setf (magpi-pimacs-handle-initial-sent handle) t)
       (with-current-buffer chat
-        (when-let ((prompt (magpi-pimacs--initial-prompt attempt)))
+        (when-let ((prompt (magpi-pimacs--initial-prompt action)))
           (pimacs-send-prompt prompt nil)))))
   handle)
 
@@ -266,6 +362,14 @@ Returns nil when DATA carries no usable token, cost, or context facts."
         (pop-to-buffer chat)
       (user-error "Attempt %s has no live chat buffer"
                   (magpi-pimacs-handle-id handle)))))
+
+(cl-defmethod magpi-backend-visit-root ((_backend magpi-pimacs-backend) root)
+  "Visit the live Pimacs chat associated with project ROOT."
+  (if-let ((chat (magpi-pimacs--live-chat-at-root root)))
+      (pop-to-buffer chat)
+    (user-error "No active Pimacs chat for project %s"
+               (file-name-nondirectory
+                (directory-file-name (expand-file-name root))))))
 
 (cl-defmethod magpi-backend-send ((_backend magpi-pimacs-backend) handle message
                                   &optional mode)
@@ -287,7 +391,7 @@ Returns nil when DATA carries no usable token, cost, or context facts."
         (listener (or listener (magpi-pimacs-handle-listener handle))))
     (when (and listener (buffer-live-p chat))
       (with-current-buffer chat
-        (magpi-pimacs--request-observations handle listener)))))
+        (magpi-pimacs--request-state handle listener)))))
 
 (provide 'magpi-pimacs-backend)
 ;;; magpi-pimacs-backend.el ends here

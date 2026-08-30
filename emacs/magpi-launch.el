@@ -1,34 +1,42 @@
-;;; magpi-launch.el --- Frozen Magpi launch specifications -*- lexical-binding: t; -*-
+;;; magpi-launch.el --- Frozen launch: model, thinking, role, bind -*- lexical-binding: t; -*-
+
+;; One job: freeze a semantic launch specification and remember launch
+;; defaults.  Catalog fill is registered by an adapter; this file does not
+;; speak Pi or Pimacs.
 
 (require 'cl-lib)
+(require 'project)
+(require 'seq)
 (require 'subr-x)
 
 (defgroup magpi nil
-  "A lean actionable workbench for Pi sessions."
+  "Magpi: freeze launch (model, thinking, role, bind) for one action."
   :group 'tools)
 
-(defcustom magpi-launch-profiles
-  '(("Default"  :thinking nil)
-    ("Quick"    :thinking low)
-    ("Standard" :thinking medium)
-    ("Deep"     :thinking high)
-    ("Off"      :thinking off)
-    ("Minimal"  :thinking minimal)
-    ("Low"      :thinking low)
-    ("Medium"   :thinking medium)
-    ("High"     :thinking high)
-    ("Xhigh"    :thinking xhigh)
-    ("Max"      :thinking max))
-  "Named effort/thinking profiles.
-Each entry is (LABEL . PLIST).  Profiles select thinking depth; an explicit
-effort choice at dispatch overrides the profile's thinking.  Requested model is
-independent and may be nil (inherit)."
-  :type '(repeat (cons string plist))
+(defconst magpi-launch-thinking-values
+  '(nil off minimal low medium high xhigh max)
+  "Semantic thinking depths a launch specification may freeze.")
+
+(defcustom magpi-launch-thinking-choices
+  '(("Default"  . nil)
+    ("Quick"    . low)
+    ("Standard" . medium)
+    ("Deep"     . high)
+    ("Off"      . off))
+  "Launch labels for thinking depth.  One axis; later richness extends this list."
+  :type '(repeat (cons string sexp))
   :group 'magpi)
 
-(defcustom magpi-default-profile "Standard"
-  "Default Magpi launch profile."
-  :type 'string
+(defcustom magpi-default-thinking 'medium
+  "Default semantic thinking depth."
+  :type '(choice (const :tag "Default" nil)
+                 (const off)
+                 (const minimal)
+                 (const low)
+                 (const medium)
+                 (const high)
+                 (const xhigh)
+                 (const max))
   :group 'magpi)
 
 (defcustom magpi-launch-models
@@ -42,43 +50,36 @@ identifier not listed here."
   :group 'magpi)
 
 (defcustom magpi-default-model "Inherit"
-  "Default launch model label.  \"Inherit\" means requested-model is nil."
+  "Default launch model label.  \"Inherit\" means requested-model is nil.
+A remembered last-used model for the project root overrides this."
   :type 'string
   :group 'magpi)
 
-(defcustom magpi-launch-efforts
-  '(("Profile"  . profile)
-    ("Default"  . none)
-    ("Off"      . off)
-    ("Minimal"  . minimal)
-    ("Low"      . low)
-    ("Medium"   . medium)
-    ("High"     . high)
-    ("Xhigh"    . xhigh)
-    ("Max"      . max))
-  "Effort labels mapped to semantic thinking values.
-`profile' defers to the selected profile.  `none' means pass no thinking flag."
-  :type '(repeat (cons string symbol))
+(defcustom magpi-default-role 'writer
+  "Default semantic launch role: `w' (writer) or `r' (reader)."
+  :type '(choice (const :tag "r · Reader" reader)
+                 (const :tag "w · Writer" writer))
   :group 'magpi)
 
-(defcustom magpi-default-effort "Profile"
-  "Default effort label.  \"Profile\" defers to the selected profile."
-  :type 'string
-  :group 'magpi)
+(defvar magpi-launch--catalog (make-hash-table :test #'equal)
+  "Cached canonical model ids by project-root key.")
 
-(defcustom magpi-default-authority 'writer
-  "Default semantic launch authority."
-  :type '(choice (const :tag "Read-only" read-only)
-                 (const :tag "Writer" writer))
-  :group 'magpi)
+(defvar magpi-launch--last-model (make-hash-table :test #'equal)
+  "Last requested canonical model id by project-root key.")
+
+(defvar magpi-launch-catalog-refresh-function nil
+  "Optional function (ROOT &optional HANDLE) that refreshes the model catalog.
+
+It must not wait.  A live reply may store the catalog later.  A synchronous
+fill should call `magpi-launch-store-catalog' before returning.")
 
 (cl-defstruct magpi-launch-spec
-  root profile requested-model thinking authority context)
+  root requested-model thinking role context)
 
-(defun magpi-normalize-intent (intent)
-  "Return authored INTENT as text or nil when it is blank.
+(defun magpi-normalize-objective (objective)
+  "Return authored OBJECTIVE as text or nil when it is blank.
 This is the sole normalization point for input collected at dispatch."
-  (let ((normalized (and (stringp intent) (string-trim intent))))
+  (let ((normalized (and (stringp objective) (string-trim objective))))
     (unless (or (null normalized) (string-empty-p normalized)) normalized)))
 
 (defun magpi-normalize-model (model)
@@ -90,65 +91,163 @@ Accepts the UI label \"Inherit\" as nil."
      ((member (downcase normalized) '("inherit" "default" "none" "◯")) nil)
      (t normalized))))
 
-(defun magpi-launch-authority-label (authority)
-  "Return the transient label for semantic AUTHORITY, or reject it."
-  (pcase authority
-    ('read-only "Read-only")
-    ('writer "Writer")
-    (_ (user-error "Unknown Magpi authority: %S" authority))))
+(defun magpi-launch--fold-model (string)
+  "Fold STRING for fuzzy model search (lowercase, drop non-alphanumerics)."
+  (replace-regexp-in-string "[^a-z0-9]+" "" (downcase (or string ""))))
 
-(defun magpi-launch-authority-from-label (label)
-  "Translate transient LABEL to a semantic authority, or reject it."
+(defun magpi-launch--model-query-matches-p (query candidate)
+  "Return non-nil when QUERY fuzzily matches CANDIDATE after folding."
+  (let* ((q (magpi-launch--fold-model query))
+         (c (magpi-launch--fold-model candidate)))
+    (cond
+     ((string-empty-p q) t)
+     ((string-search q c) t)
+     (t
+      (let ((i 0)
+            (n (length c)))
+        (catch 'magpi-launch--no-match
+          (dotimes (qi (length q))
+            (let ((ch (aref q qi)))
+              (while (and (< i n) (not (eq (aref c i) ch)))
+                (setq i (1+ i)))
+              (when (>= i n)
+                (throw 'magpi-launch--no-match nil))
+              (setq i (1+ i))))
+          t))))))
+
+(defun magpi-launch--filter-models (query candidates &optional pred)
+  "Return CANDIDATES matching QUERY under `magpi-launch--model-query-matches-p'."
+  (seq-filter
+   (lambda (candidate)
+     (and (or (null pred) (funcall pred candidate))
+          (magpi-launch--model-query-matches-p query candidate)))
+   candidates))
+
+(defun magpi-launch-model-completion-table (&optional root)
+  "Completion table for ROOT's models with normalized fuzzy search."
+  (let ((candidates (magpi-launch-model-choices root)))
+    (lambda (string pred action)
+      (pcase action
+        ('metadata
+         '(metadata (category . magpi-model)
+                    (display-sort-function . identity)
+                    (cycle-sort-function . identity)))
+        ('t
+         (magpi-launch--filter-models string candidates pred))
+        ('lambda
+         (test-completion string candidates pred))
+        ('nil
+         (try-completion string
+                         (magpi-launch--filter-models string candidates pred)
+                         pred))
+        (_
+         (complete-with-action action candidates string pred))))))
+
+(defun magpi-launch-current-root ()
+  "Return the project root that launch choices should remember against."
+  (file-name-as-directory
+   (expand-file-name
+    (if-let ((project (project-current)))
+        (project-root project)
+      default-directory))))
+
+(defun magpi-launch--root-key (root)
+  (file-truename (file-name-as-directory (expand-file-name (or root default-directory)))))
+
+(defun magpi-launch-cached-models (&optional root)
+  "Return cached canonical model ids for ROOT, or nil."
+  (gethash (magpi-launch--root-key root) magpi-launch--catalog))
+
+(defun magpi-launch-store-catalog (root models)
+  "Remember MODELS as the launch catalog for ROOT.
+
+Empty or malformed replies leave the previous catalog in place."
+  (let ((ids (delq nil (mapcar #'magpi-normalize-model models))))
+    (when ids
+      (puthash (magpi-launch--root-key root) (seq-uniq ids) magpi-launch--catalog)
+      ids)))
+
+(defun magpi-launch-refresh-catalog (&optional root handle)
+  "Refresh ROOT's model catalog without waiting.
+
+A registered filler may store models now or when a live reply arrives.
+Returns whatever is already cached."
+  (when magpi-launch-catalog-refresh-function
+    (funcall magpi-launch-catalog-refresh-function
+             (or root (magpi-launch-current-root))
+             handle))
+  (magpi-launch-cached-models root))
+
+(defun magpi-launch-last-model (&optional root)
+  "Return the last requested canonical model for ROOT, or nil."
+  (gethash (magpi-launch--root-key root) magpi-launch--last-model))
+
+(defun magpi-launch-remember-model (root model)
+  "Remember MODEL as the next launch default for ROOT.
+
+Inherit/blank does not erase a previous explicit choice."
+  (when-let ((id (magpi-normalize-model model)))
+    (puthash (magpi-launch--root-key root) id magpi-launch--last-model)
+    id))
+
+(defun magpi-launch-default-model (&optional root)
+  "Return the model label to offer first at launch for ROOT."
+  (or (magpi-launch-last-model root) magpi-default-model))
+
+(defun magpi-launch-model-choices (&optional root)
+  "Return completing-read candidates for ROOT's launch model."
+  (let* ((root (magpi-launch--root-key root))
+         (last (gethash root magpi-launch--last-model))
+         (cached (gethash root magpi-launch--catalog)))
+    (seq-uniq
+     (delq nil
+           (append (list "Inherit" last)
+                   magpi-launch-models
+                   cached)))))
+
+(defun magpi-launch-role-label (role)
+  "Return the transient label for semantic ROLE, or reject it."
+  (pcase role
+    ('reader "r")
+    ('writer "w")
+    (_ (user-error "Unknown Magpi role: %S" role))))
+
+(defun magpi-launch-role-from-label (label)
+  "Translate a compact `r' or `w' LABEL to semantic role."
   (pcase label
-    ("Read-only" 'read-only)
-    ("Writer" 'writer)
-    (_ (user-error "Unknown Magpi authority label: %s" label))))
+    ((or "r" "Reader" "Read-only") 'reader)
+    ((or "w" "Writer") 'writer)
+    (_ (user-error "Unknown Magpi role label: %s" label))))
 
-(defun magpi-launch-context-kind-from-label (label)
-  "Translate transient LABEL to a semantic context kind, or reject it."
+(defun magpi-launch-bind-from-label (label)
+  "Translate bind-at-spawn LABEL to a semantic kind, or reject it."
   (pcase label
     ("None" 'none)
     ("Point" 'point)
     ("Region" 'region)
-    (_ (user-error "Unknown Magpi context label: %s" label))))
+    (_ (user-error "Unknown Magpi bind label: %s" label))))
 
-(defun magpi-launch-context-kind-label (kind)
-  "Return the transient label for semantic context KIND."
+(defun magpi-launch-bind-label (kind)
+  "Return the transient label for bind-at-spawn KIND."
   (pcase kind
     ('none "None")
     ('point "Point")
     ('region "Region")
-    (_ (user-error "Unknown Magpi context kind: %S" kind))))
+    (_ (user-error "Unknown Magpi bind kind: %S" kind))))
 
 (defun magpi-launch-source-buffer-p ()
   "Return non-nil when the current buffer can be frozen as file evidence.
 
-Magpi status and Pimacs chat are porcelain, not source.  Capturing them as
-Point/Region context feeds the workbench back into the agent prompt."
+Magpi status and Pimacs chat are porcelain, not source."
   (and (stringp buffer-file-name)
        (not (string-empty-p buffer-file-name))
        (not (derived-mode-p 'magpi-status-mode 'pimacs-chat-mode))))
 
-(defun magpi-launch-default-context-kind ()
-  "Choose a context kind that cannot capture workbench porcelain as evidence."
-  (cond
-   ((and (use-region-p) (magpi-launch-source-buffer-p)) 'region)
-   ((magpi-launch-source-buffer-p) 'point)
-   (t 'none)))
-
-(defun magpi-launch-profile (name)
-  "Return the settings for profile NAME, or reject an unknown profile."
-  (or (cdr (assoc name magpi-launch-profiles))
-      (user-error "Unknown Magpi profile: %s" name)))
-
-(defun magpi-launch-effort-from-label (label)
-  "Translate effort LABEL to a thinking value or the symbol `profile'.
-nil means pass no explicit thinking flag (provider default)."
-  (let* ((label (or label magpi-default-effort))
-         (entry (assoc label magpi-launch-efforts)))
-    (unless entry
-      (user-error "Unknown Magpi effort label: %s" label))
-    (cdr entry)))
+(defun magpi-launch-default-bind ()
+  "Default bind-at-spawn: None unless an active region is source evidence."
+  (if (and (use-region-p) (magpi-launch-source-buffer-p))
+      'region
+    'none))
 
 (defun magpi-launch-thinking-label (thinking)
   "Return a scannable label for semantic THINKING."
@@ -163,36 +262,54 @@ nil means pass no explicit thinking flag (provider default)."
     ('max "max")
     (_ (format "%s" thinking))))
 
-(defun magpi-launch-build (root profile authority context &optional requested-model effort)
+(defun magpi-launch-thinking-choice-label (thinking)
+  "Return the launch-menu label for THINKING."
+  (or (car (rassq thinking magpi-launch-thinking-choices))
+      (magpi-launch-thinking-label thinking)))
+
+(defun magpi-launch-thinking-from-label (label)
+  "Translate launch-menu LABEL to a semantic thinking value."
+  (let* ((label (or label
+                    (magpi-launch-thinking-choice-label magpi-default-thinking)))
+         (entry (assoc label magpi-launch-thinking-choices)))
+    (unless entry
+      (user-error "Unknown Magpi thinking: %s" label))
+    (cdr entry)))
+
+(defun magpi-launch-context-title (context)
+  "Return a concise fallback chat title derived from frozen CONTEXT."
+  (let ((file (plist-get context :file))
+        (line (plist-get context :line)))
+    (cond
+     ((and (stringp file) line) (format "%s:%s" file line))
+     ((stringp file) file)
+     ((eq (plist-get context :kind) 'region) "Selection")
+     ((eq (plist-get context :kind) 'point) "Current location")
+     (t "New chat"))))
+
+(defun magpi-launch-build (root thinking role context &optional requested-model)
   "Resolve one immutable launch specification.
 
-ROOT, PROFILE, AUTHORITY, and CONTEXT are captured before a backend is called.
+ROOT, THINKING, ROLE, and CONTEXT are captured before an adapter is called.
+THINKING is a value from `magpi-launch-thinking-values'.
 REQUESTED-MODEL is a canonical provider/model id or nil (inherit).
-EFFORT is a thinking symbol, `profile' (use PROFILE's thinking), or `none'
-(no thinking flag).  Omitted EFFORT means `profile'.
-Authored intent belongs exclusively to the attempt, not this configuration."
-  (unless (memq authority '(read-only writer))
-    (user-error "Unknown Magpi authority: %S" authority))
+Authored intent belongs exclusively to the action, not this configuration."
+  (unless (memq thinking magpi-launch-thinking-values)
+    (user-error "Unknown Magpi thinking: %S" thinking))
+  (unless (memq role '(reader writer))
+    (user-error "Unknown Magpi role: %S" role))
   (unless (memq (plist-get context :kind) '(none point region))
-    (user-error "Unknown Magpi context kind: %S" (plist-get context :kind)))
-  (let* ((settings (magpi-launch-profile profile))
-         ;; Omitted EFFORT defaults to `profile' so legacy callers keep
-         ;; resolving thinking from the named profile.  `none' freezes
-         ;; thinking as nil (no transport flag).
-         (effort (if (eq effort nil) 'profile effort))
-         (thinking (pcase effort
-                     ('profile (plist-get settings :thinking))
-                     ('none nil)
-                     (_ effort)))
-         (model (magpi-normalize-model requested-model)))
+    (user-error "Unknown Magpi bind kind: %S" (plist-get context :kind)))
+  (let ((model (magpi-normalize-model requested-model)))
     (when (and model
-               (not (string-match-p "\\`[^/]+/.+\\'" model)))
+               (not (string-match-p "\\`[^/]+/.+\\\'" model)))
       (user-error "Model must be a provider/model identifier: %s" model))
     (make-magpi-launch-spec
-     :root root :profile profile
+     :root root
      :requested-model model
      :thinking thinking
-     :authority authority :context context)))
+     :role role
+     :context context)))
 
 (provide 'magpi-launch)
 ;;; magpi-launch.el ends here

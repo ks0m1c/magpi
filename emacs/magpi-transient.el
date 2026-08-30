@@ -1,73 +1,103 @@
-;;; magpi-transient.el --- Minimal launch interface for Magpi -*- lexical-binding: t; -*-
+;;; magpi-transient.el --- Spawn surface: model, thinking, role, bind -*- lexical-binding: t; -*-
+
+;; One job: collect launch choices and hand them to orchestration.
 
 (require 'transient)
 (require 'magpi-launch)
 
-(declare-function magpi-spawn-from-options "magpi" (options))
+(defvar magpi-launch-intention-id nil
+  "Intention selected by `magpi-spawn-in-intention' for this dispatch.")
 
-(defun magpi-launch--read-profile (prompt initial-input _history)
-  (completing-read prompt (mapcar #'car magpi-launch-profiles)
-                   nil t initial-input nil magpi-default-profile))
+(defvar magpi-launch-execute-function nil
+  "Function of one options plist invoked by `magpi-launch-dispatch'.
+Installed by Magpi orchestration so the transient can autoload alone.")
 
-(defun magpi-launch--read-effort (prompt initial-input _history)
-  (completing-read prompt (mapcar #'car magpi-launch-efforts)
-                   nil t initial-input nil magpi-default-effort))
+;; Binary role must stay set: plain `transient-switches' cycles to nil.
+;; Only define the class when real Transient eieio types are present.
+(when (and (fboundp 'transient-infix-read)
+           (get 'transient-switches 'cl--class))
+  (defclass magpi-launch-role-switch (transient-switches) ()
+    "Two-state role switch; never clears the choice.")
+  (cl-defmethod transient-infix-read ((obj magpi-launch-role-switch))
+    (if (equal (oref obj value) "--role=w")
+        "--role=r"
+      "--role=w")))
+
+(defun magpi-launch--read-thinking (prompt initial-input _history)
+  (completing-read prompt (mapcar #'car magpi-launch-thinking-choices)
+                   nil t initial-input nil
+                   (magpi-launch-thinking-choice-label magpi-default-thinking)))
 
 (defun magpi-launch--read-model (prompt initial-input _history)
-  (completing-read prompt magpi-launch-models
-                   nil nil initial-input nil magpi-default-model))
-
-(defun magpi-launch--read-authority (prompt initial-input _history)
-  (completing-read prompt '("Writer" "Read-only")
-                   nil t initial-input nil
-                   (magpi-launch-authority-label magpi-default-authority)))
+  "Read a canonical model id with normalized fuzzy completing-read."
+  (magpi-launch-refresh-catalog (magpi-launch-current-root))
+  ;; `basic' only: the table owns normalized fuzzy filtering.  Extra
+  ;; styles would re-filter against the raw (unnormalized) query.
+  (let ((completion-styles '(basic))
+        (completion-category-defaults nil)
+        (completion-category-overrides nil))
+    (completing-read prompt (magpi-launch-model-completion-table)
+                     nil nil initial-input nil
+                     (magpi-launch-default-model))))
 
 (defun magpi-launch--read-context (prompt initial-input _history)
-  (completing-read prompt '("Point" "Region" "None")
+  (completing-read prompt '("Point" "Region" "None")  ; None = do not bind
                    nil t initial-input nil
-                   (magpi-launch-context-kind-label
-                    (magpi-launch-default-context-kind))))
+                   (magpi-launch-bind-label
+                    (magpi-launch-default-bind))))
 
 (defun magpi-launch--initial-values (prefix)
+  (magpi-launch-refresh-catalog (magpi-launch-current-root))
   (oset prefix value
-        (list (concat "--profile=" magpi-default-profile)
-              (concat "--effort=" magpi-default-effort)
-              (concat "--model=" magpi-default-model)
-              (concat "--authority="
-                      (magpi-launch-authority-label magpi-default-authority))
+        (list (concat "--thinking="
+                      (magpi-launch-thinking-choice-label magpi-default-thinking))
+              (concat "--model=" (magpi-launch-default-model))
+              (concat "--role="
+                      (magpi-launch-role-label magpi-default-role))
               (concat "--context="
-                      (magpi-launch-context-kind-label
-                       (magpi-launch-default-context-kind))))))
+                      (magpi-launch-bind-label
+                       (magpi-launch-default-bind))))))
+
+(defun magpi-launch--options-from-args (args)
+  "Translate transient ARGS into a semantic options plist."
+  (append
+   (list :thinking (magpi-launch-thinking-from-label
+                    (transient-arg-value "--thinking=" args))
+         :model (transient-arg-value "--model=" args)
+         :role (magpi-launch-role-from-label
+                     (transient-arg-value "--role=" args))
+         :bind (magpi-launch-bind-from-label
+                        (transient-arg-value "--context=" args)))
+   (when magpi-launch-intention-id
+     (list :intention-id magpi-launch-intention-id))))
 
 (defun magpi-launch-dispatch ()
   "Validate transient labels and hand semantic choices to Magpi orchestration."
   (interactive)
-  (let ((args (transient-args 'magpi-launch)))
-    (magpi-spawn-from-options
-     (list :intent (transient-arg-value "--intent=" args)
-           :profile (transient-arg-value "--profile=" args)
-           :effort (magpi-launch-effort-from-label
-                    (transient-arg-value "--effort=" args))
-           :model (transient-arg-value "--model=" args)
-           :authority (magpi-launch-authority-from-label
-                       (transient-arg-value "--authority=" args))
-           :context-kind (magpi-launch-context-kind-from-label
-                          (transient-arg-value "--context=" args))))))
+  (unless magpi-launch-execute-function
+    ;; `magpi-launch' is autoloaded from this file; orchestration lives in magpi.el.
+    (require 'magpi)
+    (unless magpi-launch-execute-function
+      (user-error "Magpi spawn is not available")))
+  (funcall magpi-launch-execute-function
+           (magpi-launch--options-from-args (transient-args 'magpi-launch))))
 
 ;;;###autoload
 (transient-define-prefix magpi-launch ()
-  "Configure the single frozen specification for a Magpi attempt."
+  "Configure the single frozen specification for a Magpi action."
   :init-value #'magpi-launch--initial-values
-  [["Intent"
-    ("i" "Intention" "--intent=" :always-read t)]
-   ["Runtime"
+  [["Model/Thinking"
     ("m" "Model" "--model=" :reader magpi-launch--read-model)
-    ("e" "Effort" "--effort=" :reader magpi-launch--read-effort)
-    ("p" "Profile" "--profile=" :reader magpi-launch--read-profile)]
+    ("t" "Thinking" "--thinking=" :reader magpi-launch--read-thinking)]
    ["Scope"
-    ("c" "Context" "--context=" :reader magpi-launch--read-context)
-    ("a" "Authority" "--authority=" :reader magpi-launch--read-authority)]
-   ["Actions"
+    ("c" "Bind" "--context=" :reader magpi-launch--read-context)
+    ;; Magit-form switches: format + regexp; class keeps the value always set.
+    ("w" "Role (Writer/Reader)" "--role=" :class magpi-launch-role-switch
+     :choices ("w" "r")
+     :argument-format "--role=%s"
+     :argument-regexp "\\(--role=\\(w\\|r\\)\\)")]
+   ["Spawn"
+    ("s" "Spawn" magpi-launch-dispatch)
     ("RET" "Spawn" magpi-launch-dispatch)]])
 
 (provide 'magpi-transient)
