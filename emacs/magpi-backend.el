@@ -51,6 +51,21 @@ reference is metadata only; binding it never loads or copies a transcript.")
 
 (cl-defmethod magpi-backend-chat-candidates ((_backend t) _root) nil)
 
+(cl-defgeneric magpi-backend-session-ref (backend handle)
+  "Return HANDLE's opaque session pointer, or nil if it is not yet known.
+
+Magpi stores the string and does not interpret it.  Nil means uncertain birth,
+not a deferred first open.")
+
+(cl-defmethod magpi-backend-session-ref ((_backend t) _handle) nil)
+
+(cl-defgeneric magpi-backend-live-p (backend handle)
+  "Return non-nil when HANDLE's agent process is actually controllable.
+
+A chat buffer is UI, not liveness.")
+
+(cl-defmethod magpi-backend-live-p ((_backend t) _handle) nil)
+
 (cl-defgeneric magpi-backend-send (backend handle message &optional mode)
   "Send MESSAGE to HANDLE, optionally using delivery MODE.")
 

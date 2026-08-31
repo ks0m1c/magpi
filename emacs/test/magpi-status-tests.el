@@ -129,7 +129,9 @@
 (ert-deftest magpi-status-wraps-long-lines-by-default ()
   (with-temp-buffer
     (magpi-status-mode)
-    (should-not truncate-lines)))
+    (should-not truncate-lines)
+    (should-not truncate-partial-width-windows)
+    (should word-wrap)))
 (ert-deftest magpi-status-heading-suffix-is-state-thinking-running-model ()
   (let* ((launch (magpi-launch-build "/tmp/" 'medium 'writer '(:kind none)))
          (action (make-magpi-action
@@ -275,7 +277,6 @@
                     :id "intent-1" :objective "Ship auth repair"
                     :worktree-path "/tmp/work/" :branch "magpi/auth"
                     :base-ref "main" :state 'active
-                    :action-ids '("t1" "t2")
                     :writer-lease '(:action-id "t1"))))
     (cl-letf (((symbol-function 'magpi-intention-git-facts)
                (lambda (_intention) '(:checkout dirty :dirty t :ahead 3 :behind 1 :exists t))))

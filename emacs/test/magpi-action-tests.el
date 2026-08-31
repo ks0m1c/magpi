@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'magpi-action)
 (require 'magpi-launch)
+(require 'magpi-test-repo)
 
 (defun magpi-test-action (&optional prompt)
   (make-magpi-action
@@ -169,6 +170,63 @@
                    (magpi-action-observation prompt)) "First task"))
     (should (equal (magpi-observation-display-title
                    (magpi-action-observation later-prompt)) "Named chat"))))
+
+(ert-deftest magpi-action-disk-omits-observation-and-keeps-chat-ref-monotonic ()
+  "Promise: Action files store pointers, not theatre; chat-ref only advances."
+  (magpi-test-with-repo (repository "magpi-action-persist-")
+    (let* ((action (make-magpi-action
+                    :id "act1"
+                    :intention-id "intent-1"
+                    :source-root repository
+                    :created-at 100
+                    :chat-ref "act1"
+                    :observation (magpi-observation-initial)
+                    :prompt "RAM only"
+                    :extras '(:future-field "keep")))
+           loaded)
+      (should (eq action (magpi-action-save action)))
+      (setq loaded (magpi-action-load repository "act1"))
+      (should (equal (magpi-action-intention-id loaded) "intent-1"))
+      (should-not (magpi-action-observation loaded))
+      (should-not (magpi-action-prompt loaded))
+      (should (equal (magpi-action-chat-ref loaded) "act1"))
+      (should (equal (plist-get (magpi-action-extras loaded) :future-field) "keep"))
+      (should (eq loaded (magpi-action-set-chat-ref loaded "act1")))
+      (should-error (magpi-action-set-chat-ref loaded "pimacs:other")))))
+
+(ert-deftest magpi-action-save-does-not-invent-identity ()
+  "Promise: save never setfs chat-ref or created-at."
+  (magpi-test-with-repo (repository "magpi-action-save-pure-")
+    (let ((action (make-magpi-action
+                   :id "x" :source-root repository
+                   :created-at 1 :chat-ref "x")))
+      (should (eq action (magpi-action-save action)))
+      (should (equal (magpi-action-chat-ref action) "x"))
+      (should (equal (magpi-action-created-at action) 1)))
+    (should-error (magpi-action-save
+                   (make-magpi-action :id "y" :source-root repository
+                                      :created-at 1)))
+    (should-error (magpi-action-save
+                   (make-magpi-action :id "z" :source-root repository
+                                      :chat-ref "z")))))
+
+(ert-deftest magpi-action-standalone-stores-spawn-oid-not-live-head ()
+  "Promise: standalone watermark is birth HEAD; no last-known tip."
+  (magpi-test-with-repo (repository "magpi-action-standalone-")
+    (let* ((oid (string-trim (magpi-test-repo-git repository "rev-parse" "HEAD")))
+           (action (make-magpi-action
+                    :id "solo"
+                    :source-root repository
+                    :spawn-oid oid
+                    :created-at 1
+                    :chat-ref "solo"
+                    :title "Standalone")))
+      (magpi-action-save action)
+      (setq action (magpi-action-load repository "solo"))
+      (should (equal (magpi-action-spawn-oid action) oid))
+      (should (equal (magpi-action-title action) "Standalone"))
+      (should-not (magpi-action-intention-id action))
+      (should-not (plist-member (magpi-action--plist action) :observation)))))
 
 (provide 'magpi-action-tests)
 ;;; magpi-action-tests.el ends here

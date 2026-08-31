@@ -2,13 +2,16 @@
 
 (require 'ert)
 (require 'magpi)
+(require 'magpi-test-repo)
 
 (cl-defstruct magpi-test-backend
-  listener initial-sent action fail-initial fail-spawn ask-response)
+  listener initial-sent action fail-initial fail-spawn ask-response visits spawn-count)
 
 (cl-defmethod magpi-backend-spawn ((backend magpi-test-backend) action listener)
   (setf (magpi-test-backend-action backend) action
-        (magpi-test-backend-listener backend) listener)
+        (magpi-test-backend-listener backend) listener
+        (magpi-test-backend-spawn-count backend)
+        (1+ (or (magpi-test-backend-spawn-count backend) 0)))
   ;; A synchronous observation must reduce the registry's stored value, not a
   ;; listener-captured action object.
   (funcall listener '(:type activity-started :activity "thinking"))
@@ -23,7 +26,7 @@
   (if (magpi-test-backend-fail-initial backend)
       (error "initial delivery failed")
     (setf (magpi-test-backend-initial-sent backend)
-          (not (null (magpi-test-backend-listener backend))))))
+          (1+ (or (magpi-test-backend-initial-sent backend) 0)))))
 
 (cl-defmethod magpi-backend-ask-supported-p ((_backend magpi-test-backend))
   t)
@@ -32,7 +35,22 @@
     ((backend magpi-test-backend) _handle ask-id response)
   (setf (magpi-test-backend-ask-response backend)
         (list ask-id response)))
+
+(cl-defmethod magpi-backend-visit ((backend magpi-test-backend) handle)
+  (setf (magpi-test-backend-visits backend)
+        (cons handle (magpi-test-backend-visits backend))))
+
+(cl-defmethod magpi-backend-live-p ((_backend magpi-test-backend) handle)
+  (and handle (not (eq handle 'dead))))
+
+(defmacro magpi-test-without-store (&rest body)
+  "Keep spawn tests from reading or writing the author's .git/magpi."
+  (declare (indent 0) (debug t))
+  `(cl-letf (((symbol-function 'magpi-store-common-dir) (lambda (&rest _) nil)))
+     ,@body))
+
 (ert-deftest magpi-event-listener-captures-only-id-and-replaces-registry-value ()
+  (magpi-test-without-store
   (let* ((backend (make-magpi-test-backend))
          (magpi-backend backend)
          (magpi--actions (make-hash-table :test #'equal))
@@ -52,9 +70,10 @@
                          "thinking"))
           (should (magpi-test-backend-initial-sent backend)))
       (when (timerp magpi--refresh-timer)
-        (cancel-timer magpi--refresh-timer)))))
+        (cancel-timer magpi--refresh-timer))))))
 
 (ert-deftest magpi-spawn-failure-preserves-attributable-action-and-handle ()
+  (magpi-test-without-store
   (let* ((backend (make-magpi-test-backend :fail-initial t))
          (magpi-backend backend)
          (magpi--actions (make-hash-table :test #'equal))
@@ -72,9 +91,10 @@
           (should (eq (magpi-observation-connection-state observation)
                       'disconnected)))
       (when (timerp magpi--refresh-timer)
-        (cancel-timer magpi--refresh-timer)))))
+        (cancel-timer magpi--refresh-timer))))))
 
 (ert-deftest magpi-partial-spawn-failure-preserves-attributable-action ()
+  (magpi-test-without-store
   (let* ((backend (make-magpi-test-backend :fail-spawn t))
          (magpi-backend backend)
          (magpi--actions (make-hash-table :test #'equal))
@@ -96,7 +116,7 @@
           (should (eq (magpi-observation-connection-state observation)
                       'disconnected)))
       (when (timerp magpi--refresh-timer)
-        (cancel-timer magpi--refresh-timer)))))
+        (cancel-timer magpi--refresh-timer))))))
 
 (ert-deftest magpi-spawn-from-options-freezes-model-and-thinking ()
   (let* ((backend (make-magpi-test-backend))
@@ -112,7 +132,7 @@
                    (lambda () "/tmp/project/"))
                   ((symbol-function 'magpi--capture-bind)
                    (lambda (_kind) '(:kind none)))
-                  ((symbol-function 'magpi--new-id)
+                  ((symbol-function 'magpi-store-new-id)
                    (lambda () "action-options")))
           (setq action
                 (magpi-spawn-from-options
@@ -138,6 +158,7 @@
                    :task "Implement it"))))
 
 (ert-deftest magpi-restated-events-do-not-reschedule-refresh ()
+  (magpi-test-without-store
   (let* ((backend (make-magpi-test-backend))
          (magpi-backend backend)
          (magpi--actions (make-hash-table :test #'equal))
@@ -158,7 +179,7 @@
             (should (eq stored (gethash "action-idempotent" magpi--actions)))
             (should-not magpi--refresh-timer)))
       (when (timerp magpi--refresh-timer)
-        (cancel-timer magpi--refresh-timer)))))
+        (cancel-timer magpi--refresh-timer))))))
 
 (ert-deftest magpi-capture-bind-rejects-porcelain ()
   (with-temp-buffer
@@ -186,10 +207,11 @@
                                              '(:kind none))
                  :started-at '(2 2 0 0)))
          (magpi--actions (make-hash-table :test #'equal)))
-    (puthash "old" older magpi--actions)
-    (puthash "new" newer magpi--actions)
-    (should (equal (mapcar #'magpi-action-id (magpi--actions-for-root root))
-                   '("new" "old")))))
+    (cl-letf (((symbol-function 'magpi-action-list) (lambda (_root) nil)))
+      (puthash "old" older magpi--actions)
+      (puthash "new" newer magpi--actions)
+      (should (equal (mapcar #'magpi-action-id (magpi--actions-for-root root))
+                     '("new" "old"))))))
 
 (ert-deftest magpi-routes-explicit-ask-answers-to-the-owning-handle ()
   (let* ((backend (make-magpi-test-backend))
@@ -291,12 +313,13 @@
                    (lambda () "/tmp/project/"))
                   ((symbol-function 'magpi--capture-bind)
                    (lambda (_kind) '(:kind none)))
-                  ((symbol-function 'magpi--new-id)
+                  ((symbol-function 'magpi-store-new-id)
                    (lambda () "standalone-task")))
           (setq action (magpi-spawn-from-options
                          '(:thinking high :role writer :context-kind none)))
           (should-not (magpi-action-intention-id action))
           (should-not (magpi-action-prompt action))
+          (should (equal (magpi-action-chat-ref action) "standalone-task"))
           (should (magpi-test-backend-initial-sent backend)))
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer)))))
@@ -322,7 +345,7 @@
                   ((symbol-function 'magpi-intention-add-action) #'ignore)
                   ((symbol-function 'magpi--capture-bind)
                    (lambda (_kind) '(:kind none)))
-                  ((symbol-function 'magpi--new-id) (lambda () "attached-task")))
+                  ((symbol-function 'magpi-store-new-id) (lambda () "attached-task")))
           (setq action (magpi-spawn-from-options
                          '(:intention-id "intent-1" :role writer :context-kind none)))
           (should ensured)
@@ -380,6 +403,275 @@
       (should discarded)
       (should (string-match-p "force-removes" prompt))
       (should (string-match-p "dirty" prompt)))))
+
+(ert-deftest magpi-spawn-spec-freezes-chat-ref-to-action-id ()
+  (magpi-test-without-store
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (action (magpi-spawn-spec
+                   "action-ref" "Inspect this"
+                   (magpi-launch-build default-directory nil 'writer
+                                       '(:kind none)))))
+    (unwind-protect
+        (progn
+          (should (equal (magpi-action-chat-ref action) "action-ref"))
+          (should (magpi-test-backend-initial-sent backend)))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer))))))
+
+
+(ert-deftest magpi-cold-ret-resumes-same-spawn-path-without-send-initial ()
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (action (make-magpi-action
+                  :id "cold-1"
+                  :chat-ref "cold-1"
+                  :source-root default-directory
+                  :launch (magpi-launch-build default-directory nil 'writer
+                                              '(:kind none)))))
+    (unwind-protect
+        (progn
+          (puthash "cold-1" action magpi--actions)
+          (magpi--visit-status-target '(:kind action :action-id "cold-1"))
+          (should (eq (gethash "cold-1" magpi--handles) 'test-handle))
+          (should-not (magpi-test-backend-initial-sent backend))
+          (should-not (magpi-action-started-at (gethash "cold-1" magpi--actions)))
+          (should (equal (magpi-action-chat-ref (gethash "cold-1" magpi--actions))
+                         "cold-1"))
+          (should (equal (magpi-test-backend-visits backend) '(test-handle))))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer)))))
+
+(ert-deftest magpi-live-ret-visits-without-respawn ()
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal)))
+    (puthash "live-1" (make-magpi-action :id "live-1") magpi--actions)
+    (puthash "live-1" 'test-handle magpi--handles)
+    (magpi--visit-status-target '(:kind action :action-id "live-1"))
+    (should-not (magpi-test-backend-action backend))
+    (should (equal (magpi-test-backend-visits backend) '(test-handle)))))
+
+(ert-deftest magpi-dead-handle-ret-respawns-without-send-initial ()
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (action (make-magpi-action
+                  :id "dead-1"
+                  :chat-ref "dead-1"
+                  :launch (magpi-launch-build default-directory nil 'writer
+                                              '(:kind none)))))
+    (unwind-protect
+        (progn
+          (puthash "dead-1" action magpi--actions)
+          (puthash "dead-1" 'dead magpi--handles)
+          (magpi--visit-status-target '(:kind action :action-id "dead-1"))
+          (should (eq (gethash "dead-1" magpi--handles) 'test-handle))
+          (should-not (magpi-test-backend-initial-sent backend))
+          (should-not (magpi-action-started-at (gethash "dead-1" magpi--actions)))
+          (should (equal (magpi-test-backend-visits backend) '(test-handle))))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer)))))
+
+
+(ert-deftest magpi-known-process-state-is-live-dead-or-absent ()
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--handles (make-hash-table :test #'equal)))
+    (should (eq (magpi--known-process-state "missing") 'absent))
+    (puthash "a" 'test-handle magpi--handles)
+    (should (eq (magpi--known-process-state "a") 'live))
+    (puthash "a" 'dead magpi--handles)
+    (should (eq (magpi--known-process-state "a") 'dead))))
+
+(ert-deftest magpi-spawn-spec-live-retry-visits-without-second-birth ()
+  (magpi-test-without-store
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (launch (magpi-launch-build default-directory nil 'writer '(:kind none)))
+         first second)
+    (unwind-protect
+        (progn
+          (setq first (magpi-spawn-spec "retry-live" "Inspect this" launch))
+          (setq second (magpi-spawn-spec "retry-live" "Inspect this" launch))
+          (should (eq first second))
+          (should (eq (magpi--known-process-state "retry-live") 'live))
+          (should (equal (magpi-test-backend-spawn-count backend) 1))
+          (should (equal (magpi-test-backend-initial-sent backend) 1))
+          (should (equal (magpi-test-backend-visits backend) '(test-handle))))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer))))))
+
+(ert-deftest magpi-spawn-spec-dead-retry-respawns-without-send-initial ()
+  (magpi-test-without-store
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (launch (magpi-launch-build default-directory nil 'writer '(:kind none)))
+         first second)
+    (unwind-protect
+        (progn
+          (setq first (magpi-spawn-spec "retry-dead" "Inspect this" launch))
+          (puthash "retry-dead" 'dead magpi--handles)
+          (should (eq (magpi--known-process-state "retry-dead") 'dead))
+          (setq second (magpi-spawn-spec "retry-dead" "Inspect this" launch))
+          (should (eq first second))
+          (should (eq (magpi--known-process-state "retry-dead") 'live))
+          (should (equal (magpi-test-backend-spawn-count backend) 2))
+          (should (equal (magpi-test-backend-initial-sent backend) 1))
+          (should (magpi-action-started-at second)))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer))))))
+(ert-deftest magpi-existing-kernel-ensure-process-does-not-reborn-theatre ()
+  "Promise: a hydrated kernel is process-retry only; no second birth."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (launch (magpi-launch-build default-directory nil 'writer '(:kind none)))
+         (kernel (make-magpi-action
+                  :id "kernel-1"
+                  :chat-ref "kernel-1"
+                  :created-at 42
+                  :source-root default-directory)))
+    (unwind-protect
+        (progn
+          (puthash "kernel-1" kernel magpi--actions)
+          (magpi-spawn-spec "kernel-1" "must not become prompt" launch)
+          (let ((action (gethash "kernel-1" magpi--actions)))
+            (should-not (magpi-action-started-at action))
+            (should-not (magpi-action-prompt action))
+            (should (equal (magpi-action-created-at action) 42))
+            (should (equal (magpi-action-chat-ref action) "kernel-1"))
+            (should-not (magpi-test-backend-initial-sent backend))
+            (should (eq (magpi--known-process-state "kernel-1") 'live))))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer)))))
+
+(ert-deftest magpi-spawn-from-options-births-once-before-process ()
+  "Promise: create freezes theatre once; ensure-process does not rebuild."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (magpi-launch--catalog (make-hash-table :test #'equal))
+         (magpi-launch--last-model (make-hash-table :test #'equal))
+         action born-at)
+    (unwind-protect
+        (cl-letf (((symbol-function 'magpi--root)
+                   (lambda () default-directory))
+                  ((symbol-function 'magpi--capture-bind)
+                   (lambda (_kind) '(:kind none)))
+                  ((symbol-function 'magpi-store-new-id)
+                   (lambda () "once-birth"))
+                  ((symbol-function 'magpi-action-save)
+                   (lambda (a) a)))
+          (setq action (magpi-spawn-from-options
+                        '(:thinking low :role reader :context-kind none)))
+          (setq born-at (magpi-action-started-at action))
+          (should born-at)
+          (should (eq (magpi-launch-spec-role (magpi-action-launch action)) 'reader))
+          (should (equal (magpi-test-backend-spawn-count backend) 1))
+          (should (equal (magpi-test-backend-initial-sent backend) 1))
+          ;; Process retry must not rebake started-at or re-send initial.
+          (puthash "once-birth" 'dead magpi--handles)
+          (setq action (magpi-spawn-spec "once-birth" nil
+                                         (magpi-action-launch action)))
+          (should (eq (magpi-action-started-at action) born-at))
+          (should (equal (magpi-test-backend-spawn-count backend) 2))
+          (should (equal (magpi-test-backend-initial-sent backend) 1)))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer)))))
+
+
+(ert-deftest magpi-action-miss-loads-kernel-without-birth ()
+  "Promise: table miss loads that id; process retry does not send-initial."
+  (magpi-test-with-repo (repository "magpi-action-miss-")
+    (let* ((backend (make-magpi-test-backend))
+           (magpi-backend backend)
+           (magpi--actions (make-hash-table :test #'equal))
+           (magpi--handles (make-hash-table :test #'equal))
+           (magpi--refresh-timer nil)
+           (default-directory repository)
+           loaded)
+      (unwind-protect
+          (cl-letf (((symbol-function 'magpi--root) (lambda () repository)))
+            (magpi-action-save
+             (make-magpi-action
+              :id "miss-1" :chat-ref "miss-1" :created-at 7
+              :source-root repository))
+            (should-not (gethash "miss-1" magpi--actions))
+            (setq loaded (magpi--action "miss-1"))
+            (should (magpi-action-p loaded))
+            (should-not (magpi-action-observation loaded))
+            (should (equal (magpi-action-created-at loaded) 7))
+            (magpi-spawn-spec "miss-1" "must not become prompt"
+                              (magpi-launch-build repository nil 'writer
+                                                  '(:kind none)))
+            (should-not (magpi-test-backend-initial-sent backend))
+            (should (eq (magpi--known-process-state "miss-1") 'live))
+            (should-not (magpi-action-prompt (gethash "miss-1" magpi--actions)))
+            (should (equal (magpi-action-created-at
+                            (gethash "miss-1" magpi--actions))
+                           7)))
+        (when (timerp magpi--refresh-timer)
+          (cancel-timer magpi--refresh-timer))))))
+
+(ert-deftest magpi-actions-for-root-joins-theatre-over-cold-disk ()
+  "Promise: glance joins RAM theatre; cold disk does not write the registry."
+  (magpi-test-with-repo (repository "magpi-join-")
+    (let* ((magpi--actions (make-hash-table :test #'equal))
+           (magpi--handles (make-hash-table :test #'equal))
+           (id "join1")
+           disk ram joined)
+      (setq disk (make-magpi-action
+                  :id id :chat-ref id :created-at 1
+                  :source-root repository))
+      (magpi-action-save disk)
+      (setq ram (copy-magpi-action disk))
+      (setf (magpi-action-observation ram) (magpi-observation-initial)
+            (magpi-action-launch ram)
+            (magpi-launch-build repository nil 'writer '(:kind none)))
+      (puthash id ram magpi--actions)
+      (setq joined (car (magpi--actions-for-root repository)))
+      (should (eq ram joined))
+      (clrhash magpi--actions)
+      (setq joined (car (magpi--actions-for-root repository)))
+      (should-not (eq ram joined))
+      (should-not (magpi-action-observation joined))
+      (should-not (gethash id magpi--actions))
+      (should (string-match-p "\\bcold\\b"
+                              (magpi-status--heading-suffix joined))))))
+
+(ert-deftest magpi-intention-commands-reread-disk ()
+  "Promise: effects load Intention coordinates; stale RAM does not win."
+  (magpi-test-with-repo (repository "magpi-intention-reread-")
+    (let ((magpi--intentions (make-hash-table :test #'equal))
+          (intention (magpi-intention-create-record "Disk why" repository "reread")))
+      (cl-letf (((symbol-function 'magpi--root) (lambda () repository)))
+        (puthash "reread"
+                 (let ((stale (copy-magpi-intention intention)))
+                   (setf (magpi-intention-objective stale) "Stale RAM")
+                   stale)
+                 magpi--intentions)
+        (should (equal (magpi-intention-objective (magpi--intention "reread"))
+                       "Disk why"))))))
 
 (provide 'magpi-tests)
 ;;; magpi-tests.el ends here

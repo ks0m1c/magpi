@@ -9,6 +9,7 @@
 (unless (require 'pimacs nil t)
   (defvar pimacs-flags nil)
   (defvar pimacs-chat-mode-map (make-sparse-keymap))
+  (defvar pimacs--agents (make-hash-table :test 'equal))
   (defvar magpi-pimacs-test--chat nil)
   (defvar magpi-pimacs-test--flags nil)
   (defvar magpi-pimacs-test--name nil)
@@ -22,7 +23,8 @@
     (setq magpi-pimacs-test--flags pimacs-flags)
     (setq magpi-pimacs-test--chat (get-buffer-create " *magpi-pimacs-test*"))
     (switch-to-buffer magpi-pimacs-test--chat)
-    (setq-local pimacs--project-key "test-project"))
+    (setq-local pimacs--project-key "test-project")
+    (puthash "test-project" t pimacs--agents))
   (defun pimacs--current-agent () t)
   (defun pimacs--set-event-listener (_name _id listener)
     (setq magpi-pimacs-test--listener listener))
@@ -58,6 +60,8 @@
          (magpi-pimacs-test--sent nil)
          (magpi-pimacs-test--terminated nil)
          (magpi-pimacs-test--commands nil))
+     (when (boundp 'pimacs--agents)
+       (clrhash pimacs--agents))
      ,@body))
 
 (ert-deftest magpi-pimacs-backend-subscribes-before-sending-initial-prompt ()
@@ -66,7 +70,8 @@
           (action (magpi-pimacs-test-action 'low "action-123456789abc"))
           (handle (magpi-backend-spawn backend action #'ignore)))
      (should (equal magpi-pimacs-test--flags
-                    '("--global" "--thinking" "low")))
+                    '("--global" "--session-id" "action-123456789abc"
+                      "--thinking" "low")))
      (should (equal magpi-pimacs-test--name "Agent · action-123456789abc"))
      (should magpi-pimacs-test--listener)
      (should-not magpi-pimacs-test--sent)
@@ -79,15 +84,17 @@
        (should (eq magpi-pimacs-test--sent first)))
      (should (equal (magpi-pimacs-handle-id handle) "action-123456789abc")))))
 
-(ert-deftest magpi-pimacs-backend-ungrouped-session-names-are-unique ()
+(ert-deftest magpi-pimacs-backend-session-names-include-the-action-id ()
   (let ((first (magpi-pimacs-test-action nil "action-one"))
-        (second (magpi-pimacs-test-action nil "action-two")))
+        (second (magpi-pimacs-test-action nil "action-two"))
+        (grouped (make-magpi-action
+                  :id "task-1" :title "Shared objective" :intention-id "intent-1"
+                  :launch (magpi-launch-build "/tmp/" nil 'writer '(:kind none)))))
     (should-not (equal (magpi-pimacs--session-name first)
                        (magpi-pimacs--session-name second)))
-    (should (string-match-p "action-one$"
-                          (magpi-pimacs--session-name first)))
-    (should (string-match-p "action-two$"
-                          (magpi-pimacs--session-name second)))))
+    (should (string-match-p "action-one$" (magpi-pimacs--session-name first)))
+    (should (string-match-p "action-two$" (magpi-pimacs--session-name second)))
+    (should (string-match-p "task-1$" (magpi-pimacs--session-name grouped)))))
 (ert-deftest magpi-pimacs-backend-titles-empty-message-from-context ()
   (magpi-pimacs-test-with-backend
    (let* ((action (make-magpi-action
@@ -105,7 +112,8 @@
            (magpi-launch-spec-thinking spec) 'high)
      (magpi-backend-spawn (make-magpi-pimacs-backend) action #'ignore)
      (should (equal magpi-pimacs-test--flags
-                    '("--global" "--provider" "openai" "--model" "gpt-4.1"
+                    '("--global" "--session-id" "action-1234"
+                      "--provider" "openai" "--model" "gpt-4.1"
                       "--thinking" "high"))))))
 
 (ert-deftest magpi-pimacs-backend-rejects-unknown-role ()
@@ -275,11 +283,74 @@
                    :launch (magpi-launch-build "/tmp/" 'medium 'writer
                                                '(:kind none))))
           (handle (magpi-backend-spawn backend action #'ignore)))
-     (should (equal magpi-pimacs-test--name "Private intention objective"))
+     (should (equal magpi-pimacs-test--name "Private intention objective · task-1"))
      (magpi-backend-send-initial backend handle action)
      (should (equal (car magpi-pimacs-test--sent) "Implement token validation"))
      (should-not (string-match-p "Private intention objective"
                                  (car magpi-pimacs-test--sent))))))
+
+(ert-deftest magpi-pimacs-backend-session-ref-is-the-action-id ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       #'ignore)))
+     (should (equal (magpi-backend-session-ref backend handle) "action-1234")))))
+
+(ert-deftest magpi-pimacs-backend-live-p-is-the-agent-process ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       #'ignore))
+          (key (magpi-pimacs-handle-key handle))
+          (chat (magpi-pimacs-handle-chat-buffer handle)))
+     (should (equal key "test-project"))
+     (cl-letf (((symbol-function 'process-live-p)
+                (lambda (proc) (eq proc 'alive-agent))))
+       (puthash key 'alive-agent pimacs--agents)
+       (should (magpi-backend-live-p backend handle))
+       (puthash key 'dead-agent pimacs--agents)
+       (should-not (magpi-backend-live-p backend handle))
+       (remhash key pimacs--agents)
+       (should-not (magpi-backend-live-p backend handle))
+       (should (buffer-live-p chat))))))
+
+(ert-deftest magpi-pimacs-backend-session-id-replaces-an-earlier-flag ()
+  (magpi-pimacs-test-with-backend
+   (let ((pimacs-flags '("--session-id" "other" "--global")))
+     (magpi-backend-spawn (make-magpi-pimacs-backend)
+                          (magpi-pimacs-test-action) #'ignore)
+     (should (equal magpi-pimacs-test--flags
+                    '("--global" "--session-id" "action-1234"))))))
+
+
+(ert-deftest magpi-pimacs-backend-spawn-drops-parent-pi-session ()
+  (magpi-pimacs-test-with-backend
+   (let ((process-environment
+          (append '("PI_SESSION_ID=parent-session"
+                    "PI_SESSION_FILE=/tmp/parent.jsonl")
+                  process-environment))
+         seen-id seen-file)
+     (cl-letf (((symbol-function 'pimacs-chat)
+                (let ((orig (symbol-function 'pimacs-chat)))
+                  (lambda (&rest args)
+                    (setq seen-id (getenv "PI_SESSION_ID")
+                          seen-file (getenv "PI_SESSION_FILE"))
+                    (apply orig args)))))
+       (magpi-backend-spawn (make-magpi-pimacs-backend)
+                            (magpi-pimacs-test-action) #'ignore))
+     (should-not seen-id)
+     (should-not seen-file))))
+(ert-deftest magpi-pimacs-backend-visit-rebinds-a-killed-chat ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       #'ignore))
+          (old (magpi-pimacs-handle-chat-buffer handle)))
+     (kill-buffer old)
+     (should-not (buffer-live-p old))
+     (magpi-backend-visit backend handle)
+     (should (buffer-live-p (magpi-pimacs-handle-chat-buffer handle)))
+     (should (equal magpi-pimacs-test--name "Agent · action-1234")))))
 
 (provide 'magpi-pimacs-backend-tests)
 ;;; magpi-pimacs-backend-tests.el ends here

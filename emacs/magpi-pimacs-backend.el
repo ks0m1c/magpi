@@ -14,8 +14,7 @@
 (cl-defstruct magpi-pimacs-backend)
 
 (cl-defstruct magpi-pimacs-handle
-  id chat-buffer cleanup initial-title listener initial-sent)
-
+  id chat-buffer cleanup initial-title listener initial-sent key root)
 (defcustom magpi-pimacs-models-store-file
   (expand-file-name "~/.pi/agent/models-store.json")
   "Pi on-disk model catalog used when no live session can answer.
@@ -33,23 +32,35 @@ Later adapters replace this value while retaining the `magpi-backend-*'
 contract verbs.")
 
 (defun magpi-pimacs--session-name (action)
-  "Return a unique Pimacs session name for ATTEMPT.
+  "Return a Pimacs session name unique to ACTION's id.
 
-Ungrouped actions must not reuse a chat whose title happens to match the new
-task.  Keep grouped intention chats human-readable while using the action ID
-as the disambiguator for standalone spawns."
+Pimacs keys agents by md5(root + name) and starts a process only when that
+key has no agent.  A shared name reuses a process and drops `--session-id'."
   (let* ((launch (magpi-action-launch action))
          (context (and launch (magpi-launch-spec-context launch)))
          (title (or (magpi-action-title action)
                     (magpi-action-prompt action)
                     (magpi-launch-context-title context)
-                    "New task"))
-         (intention-id (magpi-action-intention-id action)))
-    (if intention-id
-        (truncate-string-to-width title 60 nil nil "…")
-      (format "%s · %s"
-              (truncate-string-to-width title 42 nil nil "…")
-              (magpi-action-id action)))))
+                    "New task")))
+    (format "%s · %s"
+            (truncate-string-to-width title 42 nil nil "…")
+            (magpi-action-id action))))
+
+(defun magpi-pimacs--without-option (flags option)
+  "Return FLAGS without OPTION and its following value."
+  (let (out)
+    (while flags
+      (if (equal (car flags) option)
+          (setq flags (cdr (cdr flags)))
+        (push (pop flags) out)))
+    (nreverse out)))
+
+(defun magpi-pimacs--listen (handle listener)
+  (pimacs--set-event-listener
+   t (magpi-pimacs-handle-id handle)
+   (lambda (event)
+     (dolist (normalized (magpi-pimacs--normalize-events event))
+       (funcall listener normalized)))))
 
 (defun magpi-pimacs--model-identifier (model)
   "Return MODEL's adapter-neutral provider/model identifier, or nil."
@@ -318,23 +329,35 @@ Authority, model, and intention identity are not prompt text."
                             (plist-get data :model))))
            (funcall listener (list :type 'model-observed :model model))))))))
 
+(defun magpi-pimacs--without-parent-session (env)
+  "Return ENV without a parent Pi session identity.
+A Magpi-spawned agent must not inherit the operator's Pi session."
+  (seq-remove
+   (lambda (entry)
+     (string-match-p
+      "\\`PI_\\(SESSION_ID\\|SESSION_FILE\\|SUBAGENT_PARENT_SESSION\\|CODING_AGENT\\)="
+      entry))
+   env))
+
 (cl-defmethod magpi-backend-spawn ((_backend magpi-pimacs-backend) action listener)
   (let* ((spec (magpi-action-launch action))
+         (root (magpi-launch-spec-root spec))
          (session-name (magpi-pimacs--session-name action))
-         (pimacs-flags (append pimacs-flags (magpi-pimacs--flags spec))))
-    (pimacs-chat session-name (magpi-launch-spec-root spec))
+         (process-environment (magpi-pimacs--without-parent-session process-environment))
+         (pimacs-flags (append (magpi-pimacs--without-option pimacs-flags "--session-id")
+                               (list "--session-id" (magpi-action-id action))
+                               (magpi-pimacs--flags spec))))
+    (pimacs-chat session-name root)
     (let* ((chat (current-buffer))
            (handle (make-magpi-pimacs-handle
                     :id (magpi-action-id action)
                     :chat-buffer chat
                     :initial-title session-name
-                    :listener listener)))
+                    :listener listener
+                    :root root
+                    :key (buffer-local-value 'pimacs--project-key chat))))
       (with-current-buffer chat
-        (pimacs--set-event-listener
-         t (magpi-pimacs-handle-id handle)
-         (lambda (event)
-           (dolist (normalized (magpi-pimacs--normalize-events event))
-             (funcall listener normalized))))
+        (magpi-pimacs--listen handle listener)
         (when-let ((agent (pimacs--current-agent)))
           (let ((cleanup (lambda ()
                            (funcall listener '(:type disconnected)))))
@@ -358,10 +381,23 @@ Authority, model, and intention identity are not prompt text."
 
 (cl-defmethod magpi-backend-visit ((_backend magpi-pimacs-backend) handle)
   (let ((chat (magpi-pimacs-handle-chat-buffer handle)))
-    (if (buffer-live-p chat)
-        (pop-to-buffer chat)
-      (user-error "Attempt %s has no live chat buffer"
-                  (magpi-pimacs-handle-id handle)))))
+    (unless (buffer-live-p chat)
+      (let ((name (magpi-pimacs-handle-initial-title handle))
+            (root (magpi-pimacs-handle-root handle)))
+        (unless (and name root)
+          (user-error "Attempt %s has no live chat buffer"
+                      (magpi-pimacs-handle-id handle)))
+        ;; Agent may still be live.  pimacs-chat reuses it and rebuilds the UI;
+        ;; flags do not apply.
+        (pimacs-chat name root)
+        (setq chat (current-buffer))
+        (setf (magpi-pimacs-handle-chat-buffer handle) chat
+              (magpi-pimacs-handle-key handle)
+              (buffer-local-value 'pimacs--project-key chat))
+        (when-let ((listener (magpi-pimacs-handle-listener handle)))
+          (with-current-buffer chat
+            (magpi-pimacs--listen handle listener)))))
+    (pop-to-buffer chat)))
 
 (cl-defmethod magpi-backend-visit-root ((_backend magpi-pimacs-backend) root)
   "Visit the live Pimacs chat associated with project ROOT."
@@ -392,6 +428,17 @@ Authority, model, and intention identity are not prompt text."
     (when (and listener (buffer-live-p chat))
       (with-current-buffer chat
         (magpi-pimacs--request-state handle listener)))))
+
+(cl-defmethod magpi-backend-session-ref ((_backend magpi-pimacs-backend) handle)
+  (and (magpi-pimacs-handle-p handle)
+       (magpi-pimacs-handle-id handle)))
+
+(cl-defmethod magpi-backend-live-p ((_backend magpi-pimacs-backend) handle)
+  (when (magpi-pimacs-handle-p handle)
+    (let* ((key (magpi-pimacs-handle-key handle))
+           (agent (and key (boundp 'pimacs--agents)
+                       (gethash key pimacs--agents))))
+      (and agent (process-live-p agent)))))
 
 (provide 'magpi-pimacs-backend)
 ;;; magpi-pimacs-backend.el ends here

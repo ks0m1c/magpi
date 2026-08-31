@@ -1,0 +1,46 @@
+#+TITLE: Persist pointers so return works
+#+STATUS: remainder
+#+FILETAGS: :magpi:durability:
+
+Settled grammar is [[file:../MAGPI.org][MAGPI.org]] Persistence.
+Plays: [[file:e2e-play.org][e2e-play.org]].
+
+Do not keep a second MAGPI.org. Do not revive: chat-ref nil trichotomy, a
+Pimacs resume verb, observation or launch on disk, last-known HEAD, 40-char
+SHA-1, jsonl as birth proof, persisted =action-ids=, =refs/magpi/=.
+
+#+begin_example
+Action     -- chat-ref -->  Pi session         durable  (chat-ref = Action id)
+   `-- handle? -->  this Emacs's process       ephemeral
+                    live / dead / absent
+                    retry: live visit; dead spawn no send-initial;
+                           absent first birth
+
+Intention  -- change -->  git origin           durable  (base-oid at birth)
+   `-- facts? -->  this worktree, now          ephemeral
+#+end_example
+
+Slices 0–2 exited on host =make test-life-pi= (D1–D3, D5, D6). RET is
+idempotent process retry from known state. Slice 3 origin is =base-oid= at
+ensure-worktree; work range never falls back to a moving =base-ref=.
+
+* Hold
+
+[⊗] locator vs retention — =base-oid= is =rev-parse= at birth, =--verify=
+later. Magpi does not keep the object. Owned refs are not earned.
+
+Cross-domain spawn is not one transaction. Persist the Action (chat-ref = id)
+first, then Pimacs. Orphans and dangling leases stay visible. No journal.
+Retry the birth on the same id; do not compensate by deleting it.
+
+* Not Magpi
+
+Pimacs =kill-buffer= on the chat runs =pimacs--cleanup-chat-buffer= and kills
+the agent. Magpi =live-p= is the process. Do not keep a process without its
+chat.
+
+Pi does not write the jsonl until a turn. =get_state :sessionFile= under
+=--session-dir= is the birth gauge.
+
+Nested =pi --mode rpc= inside Magpi's Landlock agent is mute on the pipe. Pi
+plays run on a host Emacs that is not that child.

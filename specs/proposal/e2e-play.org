@@ -1,0 +1,291 @@
+#+TITLE: Play spec — e2e spikes for durability
+#+STATUS: active
+#+FILETAGS: :magpi:spike:e2e:
+
+A play is an interruption of the operator loop, judged by Git or Pi, not by
+Magpi's internals. This is not a test framework, not a second Emacs, not a
+reason to restart the Pimacs session that authors Magpi.
+
+Canon: [[file:../MAGPI.org][MAGPI.org]] (promises, not call graphs),
+[[file:durablity.org][durablity.org]] (remainder),
+[[file:../_meta/KUMITE.org][Kumite shortcut]].
+
+[⊗] porcelain vs runtime — Magpi stores coordinates; these plays ask Git and Pi.
+[⊗] locator vs retention — no =refs/magpi/= until a play shows origin-missing is not enough.
+
+* Why a play, not =make test-unit=
+
+Unit tests stub Pimacs and use real Git fixtures. They cannot lie about Magpi's
+=if=. They cannot speak for =get_state.sessionId= or a dead agent in
+=pimacs--agents=.
+
+Seams load Magit/Transient. They do not start =pi=.
+
+Slice 0/2 DONE criteria are *runs*, not adapter shape:
+
+#+begin_example
+persist → (optional hydrate) → RET → same Pi session
+kill agent → live-p false → RET → same sessionId → live
+#+end_example
+
+A play is that run in a *toy repo*, in a *second Emacs*, then torn down.
+
+* Isolation (non-negotiable)
+
+Do not use the author's live Doom (the Pimacs that holds this work).
+
+| Thing | Rule |
+|-------+------|
+| Emacs | Second process: =emacs -Q --batch= or =emacs --daemon="magpi-life"= + =emacsclient -s magpi-life=. Never pid of the authoring session. |
+| Repo | =make-temp-file= git repo (same neutralization as =magpi-test-repo.el=). Delete on pass; *retain path and print it on fail*. |
+| Pi sessions | =--session-dir <toy>/sessions=. Never =~/.pi/agent/sessions/= of the author. |
+| Network | =PI_OFFLINE=1=. No =send-initial=. No model turn. =get_state= is the gauge. |
+| Magpi sandbox | Do not run Pi plays inside Magpi's agent sandbox (nested =pi= RPC is mute). Host shell: =make test-life-pi=, or =systemd-run --user= from a Magpi session. |
+| doom sync / restart | Not required for =emacs -Q=. Required only if probing the *author's* Doom (don't). |
+
+Load path for =-Q= (straight build that already has Magit *and* Pimacs):
+
+#+begin_example
+compat timeout spinner pcre2el transient magit-section magit
+-L magpi/emacs -L magpi/emacs/test
+-L …/straight/build-*/pimacs
+#+end_example
+
+Pimacs Package-Requires: Emacs 29.1, compat, timeout, spinner, pcre2el, transient.
+=pi= on =PATH=. Skip the whole Pi rung if either is missing — do not fake it.
+
+* Rungs
+
+| Rung | Command (intended) | Needs | Already |
+|------+--------------------+-------+---------|
+| unit | =make test-unit= | nothing | yes |
+| seams | =make test-seams= | Magit straight | yes |
+| life-git | =make test-life= | git, Magpi lisp | yes |
+| life-pi | =make test-life-pi= | + Pimacs + =pi=; host Emacs | D1–D3, D5, D6 here; D4 is Pimacs |
+
+Each play: one promise, one interrupt, one exogenous gauge, retain evidence.
+
+Do not assert: =require=, hook lists, that Magpi called Magpi, buffer names as
+identity, 40-char SHA-1 (oid = string Git accepts).
+
+* Loop × interrupt
+
+The operator loop is MAGPI.org:
+
+=intention → action → chat / edits → glance → Magit → react=
+
+Interrupts are the plays. Rows already green in unit tests are marked
+=unit=. They still belong here so the map is complete; do not duplicate ERT.
+
+** A. Intention birth (Git)
+
+*** A1 Worktree from a branch oid
+- Setup: toy repo on =master=; =magpi-intention-create-record=; =ensure-worktree=.
+- Gauge: =git -C worktree rev-parse HEAD= equals persisted =base-oid=;
+  =base-ref= is =refs/heads/…=.
+- Status: *unit* (=magpi-intention-birth-freezes-base-oid-not-moving-ref=).
+
+*** A2 Destination moves
+- Interrupt: commit on source =master= after birth.
+- Gauge: loaded =base-oid= unchanged; =work-range= still =<oid>..HEAD=.
+- Status: *unit*.
+
+*** A3 Detached HEAD refuses birth
+- Interrupt: =git checkout --detach=.
+- Gauge: =ensure-worktree= is =user-error=; no worktree path.
+- Status: *unit*.
+
+*** A4 Adopt interrupted birth
+- Interrupt: worktree+branch exist; record has nil path/oid.
+- Gauge: retry adopts same path/branch; =base-oid= only if HEAD equals dest oid.
+- Status: *unit*.
+
+*** A5 Unknown origin is not work
+- Interrupt: persist with =base-oid= nil after a worktree exists.
+- Gauge: =git-facts :origin= = unknown; =work-range= errors. Drift vs current
+  =base-ref= may still exist and must not be labelled "this intention's work."
+- Status: *unit*.
+
+** B. Git mutations (crash windows)
+
+*** B1 Merge receipt before Git
+- Setup: clean worktree, one commit ahead, quiescent.
+- Gauge: audit contains =merge-started= with =from-oid=; after success state
+  =merged= and =to-oid= ≠ =from-oid=; file exists in source checkout.
+- Status: *unit*.
+
+*** B2 Conflicted merge
+- Interrupt: overlapping edits; =merge-record= errors.
+- Gauge: intention still =active=; last audit =merge-failed=; =.git/MERGE_HEAD=
+  exists. Not reported as merged.
+- Status: *unit*.
+
+*** B3 Discard persists first
+- Interrupt: dirty worktree; =discard-record=.
+- Gauge: state =discarded= on disk *even if* a later =worktree remove= were to
+  fail (force the fail in a dedicated play by shadowing =magpi-git= after save).
+  Happy path: directory gone, record =discarded=.
+- Status: happy path *unit*; failed remove *not written*.
+
+*** B4 Extra keys / unreadable
+- Interrupt: =:future-field= on disk; truncated plist as =bad.el=.
+- Gauge: extra survives next save; list contains =magpi-unreadable= with path
+  and error, plus the good record. Not silent drop.
+- Status: *unit*.
+
+** C. Action disk (slice 1)
+
+*** C1 Persist before spawn
+- Setup: =spawn-from-options= / =spawn-spec= in a git root.
+- Gauge: =<git-common-dir>/magpi/actions/<id>.el= exists before adapter returns.
+  File has =:chat-ref= = id, no =:observation=, no launch.
+- Status: *unit* for save shape; *life-git* for order vs real spawn if desired.
+
+*** C2 Glance without theatre
+- Interrupt: empty =magpi--actions=; =magpi--actions-for-root= / Status open.
+- Gauge: Action present; =observation= nil; glance not =starting= / not pending
+  ask. =chat-ref= unchanged. Paint does not =puthash=.
+- Status: *life-git*. Unit covers the join.
+
+*** C3 Standalone watermark
+- Setup: no intention; spawn in toy checkout.
+- Gauge: =spawn-oid= = =rev-parse HEAD= at birth; no merge/discard; =m= is that
+  checkout; =d= only if oid is ancestor of HEAD.
+- Status: persist shape *unit*; Magit doors *life-git* or seams.
+
+*** C4 Dual membership (excise probe)
+- Interrupt: Intention files do not store =:action-ids=. Status groups by
+  =Action.intention-id=.
+- Gauge: nested glance still holds; writer lease still on Intention; RAM
+  index lists the Action.
+- Status: *life-git*.
+
+** D. Pi reconnect (slices 0 and 2)
+
+Skip the entire rung unless =(executable-find "pi")= and Pimacs loads.
+
+Shared setup:
+
+#+begin_example
+TOY=$(mktemp -d magpi-life-pi-XXXX)
+git init -b master; one commit
+SESS=$TOY/sessions
+export PI_OFFLINE=1
+pimacs-flags = --session-dir $SESS --no-extensions --offline
+Action id = a stable nonempty string Magpi would persist (e.g. magpi-life-aaaaaaaa)
+Launch root = $TOY
+Never magpi-backend-send-initial
+#+end_example
+
+Wait for agent: poll =pimacs--current-agent= / =process-live-p=, timeout ~8s
+(Pimacs integration uses =sleep-for 2=; prefer poll).
+
+Gauge always: =pimacs--send-command-sync "get_state" '()= →
+=:sessionId= and =:sessionFile= under =$SESS=. Not Magpi's handle id except
+where we *chose* them equal.
+
+*** D1 Birth binds Pi to Action id
+- Act: =magpi-backend-spawn= (or Magpi spawn with resume nil but *no* initial
+  prompt — empty prompt is enough).
+- Gauge: flags contain exactly one =--session-id= = Action id (strip earlier).
+  =get_state :sessionId= equals Action id. =:sessionFile= is under =$SESS=
+  (the jsonl need not exist until a turn).
+- Fail: Pimacs started without the flag; Pi minted another id.
+
+*** D2 Kill agent → cold
+- Interrupt: =delete-process= on =pimacs--current-agent= (or
+  =pimacs--kill-agent=). Allow sentinel to =remhash=.
+- Gauge: =magpi-backend-live-p= is nil. Buffer may still live — that is not
+  liveness. Status *should* not claim running *from live-p*; observation may
+  still be stale until disconnect. Record that split if it happens — do not
+  "fix" with more states in the same play.
+- Fail: =live-p= true on a dead process.
+
+*** D3 RET / open without send-initial
+- Act: =magpi--open-action= / =magpi--attach … t= / second =spawn= with same
+  Action id and session name.
+- Gauge: =get_state :sessionId= *same string as D1*. Same jsonl path (or same
+  id in a successor file Pi may rotate — id is the contract, not the filename).
+  Adapter =initial-sent= false / no prompt RPC.
+- Fail: new uuid; =send-initial= fired; =user-error= not live because
+  =pimacs-chat= reused a key with no agent and did not start one.
+
+*** D4 Live process, killed buffer
+- Interrupt: =kill-buffer= chat; process still live.
+- Act: =magpi-backend-visit=.
+- Gauge: a live chat buffer; =live-p= still true; =get_state= same id.
+- Status: *fail on Pimacs*. Chat =kill-buffer-hook= runs
+  =pimacs--cleanup-chat-buffer= → =pimacs--kill-agent=. Magpi unit
+  =visit-rebinds-a-killed-chat= stubs this. Do not keep a process without
+  the chat. RET after death is D3 (open without send-initial).
+
+*** D5 Two Actions, one intention
+- Act: two spawns, same launch root, different ids, intention-scoped titles.
+- Gauge: two Pimacs names (each ends with its id); two =--session-id=; two
+  =get_state= sessionIds and =sessionFile= paths under =$SESS=. Not one agent
+  stolen by the second spawn.
+- Fail: second spawn's flags ignored because =md5(root+name)= collided.
+
+*** D6 Hydrate then RET (Emacs death stand-in)
+- Interrupt: do not restart the authoring Emacs. In the *life* Emacs: spawn D1,
+  kill the Magpi registries (=clrhash magpi--actions= / =magpi--handles=),
+  =magpi-action-load= / hydrate, then D3.
+- Gauge: disk =chat-ref= = id; open reconnects same Pi id; observation nil
+  until events. This *is* restart for Magpi's purposes.
+- Fail: hydrate paints =starting=; open mints a new Pi session.
+- Status: *life-pi*.
+
+** E. Operator loop (optional, no Pi)
+
+*** E1 Writer lease survives disconnect
+- Already unit: disconnect does not release lease.
+- life-git: optional if a fake backend is not enough.
+
+*** E2 React merge / discard
+- Seams/unit cover Git. Full Transient React in =-Q= is optional seams, not
+  slice 0.
+
+* Failure evidence
+
+On fail:
+
+1. Print toy repo path; do not delete.
+2. Print =$SESS= listing and the =get_state= plist (Pi plays).
+3. Print Magpi file =<git-common-dir>/magpi/{intentions,actions}/*.el=.
+4. Leave worktrees; =git worktree list --porcelain=.
+
+Same ethic as =magpi-test-with-repo=.
+
+* Makefile
+
+#+begin_example
+test-life:     emacs -Q --batch … magpi-life-play.el  (git)
+test-life-pi:  same, Pi; host Emacs only
+test:          test-unit test-seams   # life-pi never default
+#+end_example
+
+Default =make test= stays fast and hermetic. Life-pi is opt-in.
+
+* Compost
+
+When a play is green in CI or on this machine for a stretch, *delete the
+corresponding worry from the proposal*, do not add a dashboard.
+
+| Green play | Excised |
+|------------|---------|
+| D1–D3, D6 | Pimacs resume verb; chat-ref nil trichotomy |
+| D5 | grouped chat name as durable identity |
+| A2 | backfill =base-oid= from moving =base-ref= |
+| C4 | persisted =action-ids= |
+| gc + origin-missing | =refs/magpi/= — still not earned |
+
+Do not compost polarities because a play is green. Porcelain/runtime stays.
+
+* Explicitly not plays
+
+- Magpi =make-process= then "associate a Pimacs buffer."
+- Full assistant turn, cost, flake.
+- =pimacs-resume= completing-read.
+- Killing the author's Doom to simulate hydrate (D6).
+- Power-loss =fsync= claims.
+- Scores, journey DSL, scenario runner.

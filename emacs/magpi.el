@@ -1,11 +1,18 @@
 ;;; magpi.el --- Magpi porcelain: intention, action, bind, react -*- lexical-binding: t; -*-
 ;; Version: 0.1.0
-;; Keywords: tools
-;; Package-Requires: ((emacs "29.1") (magit "3.0") (transient "0.4"))
+;; Keywords: tools git
+;; Package-Requires: ((emacs "29.1") (magit "3.0") (transient "0.4") (pimacs "0.4"))
 
 ;; One job: registry and effects for Intention and Action.
 ;; Bind and React are powers; glance is status; depth is Magit; adapter is Pimacs.
 
+;;; Commentary:
+
+;; Magpi is a tiny intention-first Emacs porcelain for deliberate Pi work.
+;; It does not replace Magit, Transient, or Pimacs: glance is Magit-mode,
+;; launch is Transient, chat is Pimacs, and Git remains Git.
+
+;;; Code:
 (require 'project)
 (require 'subr-x)
 (require 'magpi-action)
@@ -53,27 +60,40 @@
 (defun magpi--root ()
   (magpi-launch-current-root))
 
-(defun magpi--new-id ()
-  (substring
-   (md5 (format "%s:%s:%s:%s" (float-time) (random) (emacs-pid) (user-uid)))
-   0 12))
-
 (defun magpi--intentions-for-root (root)
   "Reload active intentions for ROOT; terminal records stay in the audit store."
-  (let ((intentions (seq-filter
-                     (lambda (intention)
-                       (eq (magpi-intention-state intention) 'active))
-                     (magpi-intention-list root))))
+  (let ((intentions (seq-filter #'magpi-intention-active-p
+                                (magpi-intention-list root))))
     (dolist (intention intentions)
       (puthash (magpi-intention-id intention) intention magpi--intentions))
     intentions))
 
+(defun magpi--lookup-action (id)
+  "Return Action ID from RAM, loading that id from the current root if needed.
+
+Miss is not birth.  Unreadable files stay out of the table."
+  (or (gethash id magpi--actions)
+      (let ((root (magpi--root)))
+        (when (and root (magpi-store-common-dir root))
+          (let ((loaded (magpi-action-load root id)))
+            (when (magpi-action-p loaded)
+              (puthash id loaded magpi--actions)
+              loaded))))))
+
+(defun magpi--action (id)
+  "Return Action ID or reject a stale selection."
+  (or (magpi--lookup-action id)
+      (user-error "This action is no longer available")))
+
 (defun magpi--intention (id)
-  "Return persisted intention ID or reject a stale selection."
-  (or (gethash id magpi--intentions)
-      (progn
-        (magpi--intentions-for-root (magpi--root))
-        (gethash id magpi--intentions))
+  "Return intention ID.  Disk is coordinates when the store exists."
+  (or (when-let ((root (magpi--root)))
+        (when (magpi-store-common-dir root)
+          (let ((loaded (magpi-intention-load root id)))
+            (when (magpi-intention-p loaded)
+              (puthash id loaded magpi--intentions)
+              loaded))))
+      (gethash id magpi--intentions)
       (user-error "Unknown Magpi intention: %s" id)))
 
 (defun magpi-intention-create (intent)
@@ -385,21 +405,26 @@ object and do not schedule another paint."
                                :problem (error-message-string error-data)))
    '(:type disconnected)))
 
-(defun magpi-spawn-spec (id prompt launch &optional intention-id title)
-  "Declare and launch immutable action ID with optional PROMPT and frozen LAUNCH.
+(defun magpi--live-handle (id)
+  "Return the live adapter handle for action ID, or nil.
 
-PROMPT is retained only for adapter/programmatic compatibility; normal launches
-leave it nil so the user authors the task in chat. TITLE labels the chat;
-INTENTION-ID records membership."
-  (let ((action (make-magpi-action
-                  :id id :title title :prompt prompt :intention-id intention-id
-                  :launch launch
-                  :observation (magpi-observation-initial)
-                  :started-at (current-time)))
-        handle
-        spawn-tried)
-    ;; Store the initial value before an adapter can synchronously emit events.
-    (puthash id action magpi--actions)
+Liveness is the agent process, not a chat buffer."
+  (when-let ((handle (gethash id magpi--handles)))
+    (when (magpi-backend-live-p magpi-backend handle)
+      handle)))
+
+(defun magpi--known-process-state (id)
+  "Return known adapter process state for action ID: `live', `dead', or `absent'."
+  (let ((handle (gethash id magpi--handles)))
+    (cond ((null handle) 'absent)
+          ((magpi-backend-live-p magpi-backend handle) 'live)
+          (t 'dead))))
+
+(defun magpi--attach (id action &optional resume)
+  "Spawn ACTION for ID and store the handle.  RESUME skips send-initial.
+
+Does not rewrite ACTION except to record an attributable launch failure."
+  (let (handle spawn-tried)
     (condition-case error-data
         (progn
           (setq spawn-tried t
@@ -407,22 +432,99 @@ INTENTION-ID records membership."
                         magpi-backend action
                         (lambda (event) (magpi--handle-event id event))))
           (puthash id handle magpi--handles)
-          (magpi-backend-send-initial magpi-backend handle action)
-          (magpi-launch-refresh-catalog (magpi-launch-spec-root launch) handle))
+          (unless resume
+            (magpi-backend-send-initial magpi-backend handle action))
+          (when-let ((launch (magpi-action-launch action)))
+            (magpi-launch-refresh-catalog (magpi-launch-spec-root launch) handle)))
       (error
-       (if spawn-tried
-           (let ((attributable (or (gethash id magpi--actions) action)))
-             ;; Preserve any synchronous facts emitted before the failure as well
-             ;; as the failure attribution itself.
-             (puthash id (magpi--record-launch-problem attributable error-data)
-                      magpi--actions)
-             (when handle
-               (puthash id handle magpi--handles))
-             (message "Magpi launch for %s failed: %s"
-                      id (error-message-string error-data)))
-         (remhash id magpi--actions))))
+       (when spawn-tried
+         (let ((attributable (or (gethash id magpi--actions) action)))
+           (puthash id (magpi--record-launch-problem attributable error-data)
+                    magpi--actions)
+           (when handle
+             (puthash id handle magpi--handles))
+           (message "Magpi launch for %s failed: %s"
+                    id (error-message-string error-data))))))
     (magpi--schedule-refresh)
     (gethash id magpi--actions)))
+
+(defun magpi--resume-root (action)
+  "Return the project root to reopen ACTION."
+  (or (and (magpi-action-launch action)
+           (magpi-launch-spec-root (magpi-action-launch action)))
+      (when-let ((intention-id (magpi-action-intention-id action))
+                 (intention (or (gethash intention-id magpi--intentions)
+                                (ignore-errors (magpi--intention intention-id)))))
+        (magpi-intention-worktree-path intention))
+      (magpi-action-source-root action)
+      (magpi--root)))
+
+(defun magpi--action-with-launch (action)
+  "Return ACTION bearing a launch.  Hydrate may lack one; defaults fill RAM only."
+  (if (magpi-action-launch action)
+      action
+    (let* ((id (magpi-action-id action))
+           (launch (magpi-launch-build
+                    (or (magpi--resume-root action)
+                        (user-error "This action has no repository locator"))
+                    magpi-default-thinking magpi-default-role '(:kind none)))
+           (next (copy-magpi-action action)))
+      (setf (magpi-action-launch next) launch)
+      (puthash id next magpi--actions)
+      next)))
+
+(defun magpi--ensure-process (id &optional resume)
+  "Bring ID's agent up from known process state.  Action must already exist.
+
+live visits; dead respawns without send-initial; absent attaches.
+RESUME non-nil skips send-initial (reopen / retry).  Dead always resumes.
+Never creates or rebakes an Action.  Miss loads the kernel, then errors."
+  (let ((action (magpi--action-with-launch (magpi--action id))))
+    (pcase (magpi--known-process-state id)
+      ('live
+       (magpi-backend-visit magpi-backend (gethash id magpi--handles))
+       (gethash id magpi--actions))
+      ('dead
+       (remhash id magpi--handles)
+       (magpi--attach id action t))
+      ('absent
+       (magpi--attach id action resume)))))
+
+(defun magpi--birth (id prompt launch &optional intention-id title)
+  "Create one Action: disk kernel plus launch theatre.  Save once.  No process.
+
+Standalone freezes spawn-oid from launch root HEAD.  chat-ref and created-at
+are set here; save does not invent them."
+  (let* ((root (or (and launch (magpi-launch-spec-root launch))
+                   (user-error "A Magpi action needs a launch root")))
+         (action (make-magpi-action
+                  :id id
+                  :title title
+                  :prompt prompt
+                  :intention-id intention-id
+                  :launch launch
+                  :observation (magpi-observation-initial)
+                  :started-at (current-time)
+                  :chat-ref id
+                  :created-at (magpi-store-unix-time)
+                  :source-root (file-name-as-directory (expand-file-name root))
+                  :spawn-oid (unless intention-id
+                               (magpi-git--maybe root "rev-parse" "HEAD")))))
+    (magpi-action-save action)
+    (puthash id action magpi--actions)
+    action))
+
+(defun magpi-spawn-spec (id prompt launch &optional intention-id title)
+  "Birth ID once when new, then ensure its process.
+
+PROMPT is adapter/programmatic only; normal launches leave it nil so the user
+authors the task in chat.  TITLE labels the chat; INTENTION-ID is membership.
+
+An ID already in RAM or on disk is process retry only: never a second birth."
+  (if (magpi--lookup-action id)
+      (magpi--ensure-process id t)
+    (magpi--birth id prompt launch intention-id title)
+    (magpi--ensure-process id nil)))
 
 (defun magpi-spawn-from-options (options)
   "Capture validated semantic OPTIONS and launch their immutable specification."
@@ -449,15 +551,15 @@ INTENTION-ID records membership."
          (role (or (plist-get options :role) magpi-default-role))
          (launch (magpi-launch-build root thinking role context
                                      (plist-get options :model)))
-         (id (magpi--new-id)))
+         (id (magpi-store-new-id)))
     (puthash intention-id intention magpi--intentions)
     (magpi-launch-remember-model root (plist-get options :model))
+    (magpi--birth id prompt launch intention-id
+                  (and intention (magpi-intention-objective intention)))
     (when intention
       (setq intention (magpi-intention-add-action intention id role))
       (puthash intention-id intention magpi--intentions))
-    (let ((action (magpi-spawn-spec
-                    id prompt launch intention-id
-                    (and intention (magpi-intention-objective intention)))))
+    (let ((action (magpi--ensure-process id nil)))
       (when (and intention (null action))
         (setq intention (magpi-intention-release-writer intention id "spawn rejected"))
         (puthash intention-id intention magpi--intentions))
@@ -477,30 +579,70 @@ INTENTION-ID records membership."
   (let ((intention-id
          (or (and target (plist-get target :intention-id))
              (when-let* ((id (and target (plist-get target :action-id)))
-                         (action (gethash id magpi--actions)))
+                         (action (magpi--lookup-action id)))
                (magpi-action-intention-id action)))))
     (if intention-id
         (magpi-spawn-in-intention intention-id)
       (magpi-launch))))
+(defun magpi--action-time (action)
+  (or (magpi-action-started-at action)
+      (let ((created (magpi-action-created-at action)))
+        (and created (seconds-to-time created)))
+      '(0 0)))
+
+(defun magpi--action-root (action)
+  (or (and (magpi-action-launch action)
+           (magpi-launch-spec-root (magpi-action-launch action)))
+      (magpi-action-source-root action)))
+
+(defun magpi--action-in-root-p (action root)
+  "Return non-nil when ACTION belongs to ROOT."
+  (let* ((root (file-truename root))
+         (action-root (magpi--action-root action))
+         (intention-id (magpi-action-intention-id action))
+         (intention (and intention-id
+                         (or (gethash intention-id magpi--intentions)
+                             (ignore-errors (magpi--intention intention-id))))))
+    (or (and action-root
+             (equal (file-truename action-root) root))
+        (and intention
+             (equal (file-truename (magpi-intention-source-root intention))
+                    root)))))
+
+(defun magpi--join-action (disk)
+  "Return this Emacs's theatre for DISK's id, or DISK (cold).
+
+Paint does not write the registry."
+  (let* ((id (magpi-action-id disk))
+         (ram (gethash id magpi--actions)))
+    (if (and (magpi-action-p ram)
+             (or (magpi-action-observation ram)
+                 (magpi-action-launch ram)
+                 (gethash id magpi--handles)))
+        ram
+      disk)))
+
 (defun magpi--actions-for-root (root)
-  (let (actions)
+  "Glance: disk kernels ⋈ this Emacs's theatre.  Paint does not puthash.
+
+RAM-only rows (unpersisted test births) still appear."
+  (let (actions ids)
+    (dolist (record (magpi-action-list root))
+      (when (magpi-action-p record)
+        (let ((joined (magpi--join-action record)))
+          (push (magpi-action-id joined) ids)
+          (push joined actions))))
     (maphash
-     (lambda (_id action)
-      (let* ((action-root (magpi-launch-spec-root (magpi-action-launch action)))
-             (intention-id (magpi-action-intention-id action))
-             (intention (and intention-id
-                             (gethash intention-id magpi--intentions))))
-        (when (or (equal (file-truename action-root) (file-truename root))
-                  (and intention
-                       (equal (file-truename (magpi-intention-source-root intention))
-                              (file-truename root))))
-           (push action actions))))
+     (lambda (id action)
+       (when (and (magpi-action-p action)
+                  (not (member id ids))
+                  (magpi--action-in-root-p action root))
+         (push action actions)))
      magpi--actions)
     (sort actions
           (lambda (a b)
-            (time-less-p (magpi-action-started-at b)
-                         (magpi-action-started-at a))))))
-
+            (time-less-p (magpi--action-time b)
+                         (magpi--action-time a))))))
 (defun magpi--reconcile-actions-for-root (root)
   "Ask the adapter to re-emit live observations for ROOT's actions.
 
@@ -508,13 +650,12 @@ This is a snapshot pull, not part of event-driven paint."
   (let ((root (file-truename root)))
     (maphash
      (lambda (id action)
-       (when (equal (file-truename
-                     (magpi-launch-spec-root (magpi-action-launch action)))
-                    root)
-         (when-let ((handle (gethash id magpi--handles)))
-           (magpi-backend-reconcile
-            magpi-backend handle
-            (lambda (event) (magpi--handle-event id event))))))
+       (when-let ((action-root (magpi--action-root action)))
+         (when (equal (file-truename action-root) root)
+           (when-let ((handle (magpi--live-handle id)))
+             (magpi-backend-reconcile
+              magpi-backend handle
+              (lambda (event) (magpi--handle-event id event)))))))
      magpi--actions)))
 
 (defun magpi--refresh-visible-buffers ()
@@ -535,7 +676,7 @@ This is a snapshot pull, not part of event-driven paint."
   (or (when-let ((intention-id (plist-get target :intention-id)))
         (magpi--intention intention-id))
       (when-let* ((id (plist-get target :action-id))
-                  (action (gethash id magpi--actions))
+                  (action (magpi--lookup-action id))
                   (intention-id (magpi-action-intention-id action)))
         (magpi--intention intention-id))))
 
@@ -543,27 +684,41 @@ This is a snapshot pull, not part of event-driven paint."
   "Status `@' entry: bind context onto TARGET's surface."
   (magpi-bind target))
 
+(defun magpi--actions-for-intention (intention-id)
+  "Actions for INTENTION-ID from the glance join, oldest first."
+  (let ((actions
+         (seq-filter
+          (lambda (action)
+            (and (magpi-action-p action)
+                 (equal (magpi-action-intention-id action) intention-id)))
+          (magpi--actions-for-root (magpi--root)))))
+    (sort actions
+          (lambda (a b)
+            (time-less-p (magpi--action-time a)
+                         (magpi--action-time b))))))
+
 (defun magpi--intention-metadata (intention)
   "Return metadata handed to Magit buffers for INTENTION."
-  (list :intention-id (magpi-intention-id intention)
-        :objective (magpi-intention-objective intention)
-        :branch (magpi-intention-branch intention)
-        :base-ref (magpi-intention-base-ref intention)
-        :action-ids (copy-sequence (magpi-intention-action-ids intention))
-        :writer-lease (copy-tree (magpi-intention-writer-lease intention))
-        :audit (copy-tree (magpi-intention-audit intention))
-        :chat-history
-        (mapcar
-         (lambda (action-id)
-           (let ((handle (gethash action-id magpi--handles)))
-             (list :action-id action-id
-                   :prompt (when-let ((action (gethash action-id magpi--actions)))
-                             (magpi-action-prompt action))
-                   :buffer (when (and handle
-                                      (fboundp 'magpi-pimacs-handle-chat-buffer))
-                             (when-let ((buffer (magpi-pimacs-handle-chat-buffer handle)))
-                               (and (buffer-live-p buffer) (buffer-name buffer)))))))
-         (magpi-intention-action-ids intention))))
+  (let ((actions (magpi--actions-for-intention (magpi-intention-id intention))))
+    (list :intention-id (magpi-intention-id intention)
+          :objective (magpi-intention-objective intention)
+          :branch (magpi-intention-branch intention)
+          :base-ref (magpi-intention-base-ref intention)
+          :action-ids (mapcar #'magpi-action-id actions)
+          :writer-lease (copy-tree (magpi-intention-writer-lease intention))
+          :audit (copy-tree (magpi-intention-audit intention))
+          :chat-history
+          (mapcar
+           (lambda (action)
+             (let* ((action-id (magpi-action-id action))
+                    (handle (gethash action-id magpi--handles)))
+               (list :action-id action-id
+                     :prompt (magpi-action-prompt action)
+                     :buffer (when (and handle
+                                        (fboundp 'magpi-pimacs-handle-chat-buffer))
+                               (when-let ((buffer (magpi-pimacs-handle-chat-buffer handle)))
+                                 (and (buffer-live-p buffer) (buffer-name buffer)))))))
+           actions))))
 
 (defun magpi--bind-magit-metadata (intention)
   "Attach INTENTION metadata to the buffer opened by a delegated Magit action."
@@ -577,30 +732,50 @@ This is a snapshot pull, not part of event-driven paint."
 
 (defun magpi--changes-action (action target)
   "Delegate exact-target Git ACTION to Magit with intention and chat metadata."
-  (let* ((intention (or (magpi--intention-for-target target)
-                        (user-error "This item has no managed intention")))
-         (path (or (magpi-intention-worktree-path intention)
-                   (user-error "Start an action before opening this intention's Git changes")))
-         (range (format "%s...%s" (magpi-intention-base-ref intention)
-                        (magpi-intention-branch intention))))
+  (if-let ((intention (magpi--intention-for-target target)))
+      (let* ((path (or (magpi-intention-worktree-path intention)
+                       (user-error "Start an action before opening this intention's Git changes"))))
+        (pcase action
+          ('status
+           (magit-status path)
+           (magpi--bind-magit-metadata intention))
+          ('diff
+           (let ((default-directory path))
+             (magit-diff-range (magpi-intention-work-range intention) nil))
+           (magpi--bind-magit-metadata intention))
+          ('log
+           (let ((default-directory path))
+             (magit-log-range (magpi-intention-work-range intention) nil))
+           (magpi--bind-magit-metadata intention))
+          ('commit
+           (puthash (file-truename path) (magpi--intention-metadata intention)
+                    magpi--pending-commit-metadata)
+           (let ((default-directory path))
+             (call-interactively #'magit-commit-create))
+           (magpi--bind-magit-metadata intention))
+          (_ (user-error "Unknown Magpi changes action: %S" action))))
+    (magpi--standalone-changes action target)))
+
+(defun magpi--standalone-changes (action target)
+  "Magit doors for a standalone Action: dirt at source-root, work from spawn-oid."
+  (let* ((id (plist-get target :action-id))
+         (record (or (and id (magpi--lookup-action id))
+                     (user-error "This item has no managed intention")))
+         (root (or (magpi-action-source-root record)
+                   (user-error "This action has no repository locator"))))
     (pcase action
-      ('status
-       (magit-status path)
-       (magpi--bind-magit-metadata intention))
+      ('status (magit-status root))
       ('diff
-       (let ((default-directory path))
-         (magit-diff-range range nil))
-       (magpi--bind-magit-metadata intention))
+       (let ((default-directory root))
+         (magit-diff-range
+          (magpi-store-frozen-range root (magpi-action-spawn-oid record) t)
+          nil)))
       ('log
-       (let ((default-directory path))
-         (magit-log-range range nil))
-       (magpi--bind-magit-metadata intention))
-      ('commit
-       (puthash (file-truename path) (magpi--intention-metadata intention)
-                magpi--pending-commit-metadata)
-       (let ((default-directory path))
-         (call-interactively #'magit-commit-create))
-       (magpi--bind-magit-metadata intention))
+       (let ((default-directory root))
+         (magit-log-range
+          (magpi-store-frozen-range root (magpi-action-spawn-oid record) t)
+          nil)))
+      ('commit (user-error "Standalone actions have no Magpi merge destination"))
       (_ (user-error "Unknown Magpi changes action: %S" action)))))
 
 (defun magpi--react-release (target)
@@ -807,53 +982,57 @@ Binary, at point, Magit-short.  Not chat-as-UI.  Offers depend on the surface:
           choices)))])
   )
 
+(defun magpi--visit-or-open-action (id)
+  "Visit a live handle, or resume the same spawn path without send-initial.
+
+Retry is keyed on known process state, not buffer liveness.  Never a second birth."
+  (if (eq (magpi--known-process-state id) 'live)
+      (magpi-backend-visit magpi-backend (gethash id magpi--handles))
+    (magpi--ensure-process id t)
+    (if-let ((handle (magpi--live-handle id)))
+        (magpi-backend-visit magpi-backend handle)
+      (user-error "Action %s is not live" id))))
+
 (defun magpi--visit-status-target (target)
   "Visit the exact typed TARGET selected in a Magpi status buffer.
 
 Pi-ask targets open React.  Intention opens Magit changes.  Actions visit chat."
   (pcase (plist-get target :kind)
-    ('intention
-     (magpi--changes-action 'status target))
-    ('root
-     (magpi-backend-visit-root magpi-backend (plist-get target :root)))
-    ((or 'ask 'ask-path)
-     (magpi-react target))
+    ('intention (magpi--changes-action 'status target))
+    ('root (magpi-backend-visit-root magpi-backend (plist-get target :root)))
+    ((or 'ask 'ask-path) (magpi-react target))
     ((or 'observed-file)
      (let* ((id (plist-get target :action-id))
-            (action (gethash id magpi--actions)))
-       (unless action
-         (user-error "This action is no longer available"))
-       (let* ((root (file-name-as-directory
-                     (file-truename
-                      (magpi-launch-spec-root (magpi-action-launch action)))))
-              (file (file-truename
-                     (expand-file-name (plist-get target :path) root))))
-         (unless (file-in-directory-p file root)
-           (user-error "Observed file is outside the action project"))
-         (find-file file))))
+            (action (magpi--action id))
+            (root (file-name-as-directory
+                   (file-truename
+                    (or (magpi--action-root action)
+                        (user-error "This action has no repository locator")))))
+            (file (file-truename (expand-file-name (plist-get target :path) root))))
+       (unless (file-in-directory-p file root)
+         (user-error "Observed file is outside the action project"))
+       (find-file file)))
     ('action
-     (let ((id (plist-get target :action-id))
-           (handle nil))
-       (unless (gethash id magpi--actions)
-         (user-error "This action is no longer available"))
-       (if-let ((handle (gethash id magpi--handles)))
-           (magpi-backend-visit magpi-backend handle)
-         (user-error "This action has no adapter handle"))))
+     (magpi--visit-or-open-action (plist-get target :action-id)))
     (_ (user-error "Unknown Magpi target: %S" (plist-get target :kind)))))
 
 ;;;###autoload
 (defun magpi-status (&optional root)
   "Open the Magit-backed Magpi status buffer for ROOT.
 
-The first paint reads the registry.  One snapshot pull then fills in
-transport-only facts such as running model; later paints are driven only
-by new observations."
+The first paint joins disk kernels with this Emacs's theatre.  One snapshot
+pull then fills in transport-only facts such as running model; later paints
+are driven only by new observations.  Paint does not write the registry."
   (interactive)
   (let ((root (file-name-as-directory
                (expand-file-name (or root (magpi--root))))))
     (magpi-status-open root
-                       (lambda () (magpi--actions-for-root root))
-                       (lambda () (magpi--intentions-for-root root))
+                       (lambda ()
+                         (magpi--actions-for-root root))
+                       (lambda ()
+                         (append (magpi--intentions-for-root root)
+                                 (seq-filter #'magpi-unreadable-p
+                                             (magpi-intention-list root))))
                        #'magpi--visit-status-target
                        #'magpi-spawn
                        (lambda ()

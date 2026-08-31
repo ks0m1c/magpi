@@ -6,6 +6,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'magpi-store)
 
 (cl-defstruct magpi-ask
   "Structured Pi-ask fact inside an observation (not a Magpi being).
@@ -17,8 +18,8 @@ React answers it; status only glances.  `question' is the ask text."
   running-model observed-files last-response problem asks)
 
 (cl-defstruct magpi-action
-  id title prompt intention-id launch observation started-at)
-
+  id title prompt intention-id launch observation started-at
+  chat-ref created-at source-root spawn-oid extras)
 (defun magpi-observation-initial ()
   "Return the initial observation for a newly declared action."
   (make-magpi-observation :activity-state 'starting
@@ -176,6 +177,105 @@ identity-preserving and skip effects.  Unknown event types are ignored."
       (let ((next (copy-magpi-action action)))
         (setf (magpi-action-observation next) observation)
         next))))
+
+(defconst magpi-action-keys
+  '(:version :type :id :intention-id :chat-ref :title :created-at
+    :source-root :spawn-oid :spawn-ref)
+  "Keys the action decoder understands.  Other keys round-trip.")
+
+(defun magpi-action--plist (action)
+  "Return ACTION as inert persisted data.  Observation and launch stay RAM."
+  (let ((intention-id (magpi-action-intention-id action)))
+    (magpi-store-plist
+     (append
+      (list :version 1
+            :type 'action
+            :id (magpi-action-id action)
+            :intention-id intention-id
+            :chat-ref (magpi-action-chat-ref action)
+            :created-at (magpi-action-created-at action))
+      (unless intention-id
+        (append (when-let ((title (magpi-action-title action)))
+                  (list :title title))
+                (when-let ((oid (magpi-action-spawn-oid action)))
+                  (list :spawn-oid oid)))))
+     (magpi-action-extras action))))
+
+(defun magpi-action--from-plist (data root file)
+  (when (magpi-unreadable-p data)
+    (error "%s" (magpi-unreadable-error data)))
+  (let ((version (plist-get data :version))
+        (type (plist-get data :type))
+        (id (plist-get data :id)))
+    (unless (equal version 1)
+      (error "Unsupported Magpi action version: %s" version))
+    (when (and type (not (eq type 'action)))
+      (error "Not an action record"))
+    (unless (magpi-store-id-ok id file)
+      (error "Invalid Magpi action record"))
+    (make-magpi-action
+     :id id
+     :intention-id (plist-get data :intention-id)
+     :chat-ref (plist-get data :chat-ref)
+     :title (plist-get data :title)
+     :created-at (plist-get data :created-at)
+     :source-root (file-name-as-directory (expand-file-name root))
+     :spawn-oid (plist-get data :spawn-oid)
+     :extras (magpi-store-extras data magpi-action-keys))))
+
+(defun magpi-action-save (action)
+  "Persist ACTION when it belongs to a Git repository.  No-op otherwise.
+
+Does not freeze identity: chat-ref and created-at must already be set."
+  (unless (and (stringp (magpi-action-chat-ref action))
+               (not (string-empty-p (magpi-action-chat-ref action))))
+    (error "chat-ref must be frozen before save"))
+  (unless (integerp (magpi-action-created-at action))
+    (error "created-at must be frozen before save"))
+  (when-let ((root (magpi-action-source-root action)))
+    (when (magpi-store-common-dir root)
+      (magpi-store-write (magpi-store-file root 'actions (magpi-action-id action))
+                         (magpi-action--plist action))))
+  action)
+
+(defun magpi-action-load (root id)
+  (let* ((file (magpi-store-file root 'actions id))
+         (data (magpi-store-read file)))
+    (cond
+     ((and (magpi-unreadable-p data)
+           (equal (magpi-unreadable-error data) "absent"))
+      nil)
+     ((magpi-unreadable-p data) data)
+     (t (magpi-action--from-plist data root file)))))
+
+(defun magpi-action-list (root)
+  "Return persisted actions for ROOT.  Unreadable files stay in the list."
+  (let (records)
+    (dolist (entry (magpi-store-list root 'actions))
+      (let ((file (car entry))
+            (data (cdr entry)))
+        (push (if (magpi-unreadable-p data)
+                  data
+                (condition-case err
+                    (magpi-action--from-plist data root file)
+                  (error (make-magpi-unreadable
+                          :path file :error (error-message-string err)))))
+              records)))
+    (nreverse records)))
+
+(defun magpi-action-set-chat-ref (action ref)
+  "Set ACTION's chat-ref monotonically: nil → REF, never silently REF-a → REF-b."
+  (unless (and (stringp ref) (not (string-empty-p (string-trim ref))))
+    (error "chat-ref must be a nonempty string"))
+  (let ((current (magpi-action-chat-ref action)))
+    (cond
+     ((equal current ref) action)
+     (current
+      (error "chat-ref is frozen at %s" current))
+     (t
+      (let ((next (copy-magpi-action action)))
+        (setf (magpi-action-chat-ref next) ref)
+        (magpi-action-save next))))))
 
 (provide 'magpi-action)
 ;;; magpi-action.el ends here

@@ -114,11 +114,15 @@ property paints once and is then stripped.  Set both `face' and
   "Return (TEXT . FACE) pairs for ATTEMPT's heading suffix."
   (let* ((launch (magpi-action-launch action))
          (observation (magpi-action-observation action))
-         (state (magpi-observation-activity-state observation))
-         (running (magpi-observation-running-model observation)))
+         (state (and observation (magpi-observation-activity-state observation)))
+         (running (and observation (magpi-observation-running-model observation))))
     (delq nil
-          (list (cons (magpi-status--activity-state-label state)
-                      (magpi-status--activity-state-face state))
+          (list (cons (if observation
+                          (magpi-status--activity-state-label state)
+                        "cold")
+                      (if observation
+                          (magpi-status--activity-state-face state)
+                        'magpi-status-quiet))
                 (cons (magpi-launch-thinking-label
                        (and launch (magpi-launch-spec-thinking launch)))
                       'magpi-status-quiet)
@@ -253,37 +257,42 @@ activity detail, connection, problem, last response, and observed files."
          (if (eq role 'writer)
              'magpi-status-pending
            'magpi-status-quiet)))
-      (when-let ((activity (magpi-observation-activity observation)))
-        (when (stringp activity)
-          (magpi-status--insert-kv
-           "activity" activity
-           (magpi-status--activity-state-face
-            (magpi-observation-activity-state observation)))))
-      (when (eq (magpi-observation-connection-state observation) 'disconnected)
-        (magpi-status--insert-kv "connection" "disconnected"
-                                 'magpi-status-alert))
-      (when-let ((problem (magpi-observation-problem observation)))
-        (magpi-status--insert-kv "problem" problem 'magpi-status-alert))
-      (when-let ((last (magpi-observation-last-response observation)))
-        (magpi-status--insert-kv "last" last 'magpi-status-quiet))
-      (when-let ((asks (magpi-observation-asks observation)))
-        (magpi-status--insert-asks id asks))
-      (when-let ((files (magpi-observation-observed-files observation)))
-        (magit-insert-section (magpi-observed-files id nil)
-          (magit-insert-heading
-           (magpi-status--face "    observed files" 'magpi-status-quiet))
-          (dolist (file files)
-            (magit-insert-section (magpi-observed-file (cons id file) nil)
-              (insert "      "
-                      (magpi-status--face file 'magpi-status-evidence)
-                      "\n"))))))))
+      (when observation
+        (when-let ((activity (magpi-observation-activity observation)))
+          (when (stringp activity)
+            (magpi-status--insert-kv
+             "activity" activity
+             (magpi-status--activity-state-face
+              (magpi-observation-activity-state observation)))))
+        (when (eq (magpi-observation-connection-state observation) 'disconnected)
+          (magpi-status--insert-kv "connection" "disconnected"
+                                   'magpi-status-alert))
+        (when-let ((problem (magpi-observation-problem observation)))
+          (magpi-status--insert-kv "problem" problem 'magpi-status-alert))
+        (when-let ((last (magpi-observation-last-response observation)))
+          (magpi-status--insert-kv "last" last 'magpi-status-quiet))
+        (when-let ((asks (magpi-observation-asks observation)))
+          (magpi-status--insert-asks id asks))
+        (when-let ((files (magpi-observation-observed-files observation)))
+          (magit-insert-section (magpi-observed-files id nil)
+            (magit-insert-heading
+             (magpi-status--face "    observed files" 'magpi-status-quiet))
+            (dolist (file files)
+              (magit-insert-section (magpi-observed-file (cons id file) nil)
+                (insert "      "
+                        (magpi-status--face file 'magpi-status-evidence)
+                        "\n")))))))))
 
 (defun magpi-status--intention-suffix (intention)
   "Return branch and checkout glance for INTENTION — depth stays in Magit."
   (let* ((facts (magpi-intention-git-facts intention))
          (branch (or (magpi-intention-branch intention) "—"))
-         (checkout (or (plist-get facts :checkout) 'unknown)))
-    (format "%s · %s" branch checkout)))
+         (checkout (or (plist-get facts :checkout) 'unknown))
+         (ahead (plist-get facts :ahead))
+         (behind (plist-get facts :behind)))
+    (if (and ahead behind)
+        (format "%s · %s · +%s -%s" branch checkout ahead behind)
+      (format "%s · %s" branch checkout))))
 
 (defun magpi-status--insert-bindings (intention)
   "Render the durable file and chat tags on INTENTION."
@@ -326,9 +335,18 @@ activity detail, connection, problem, last response, and observed files."
         (push action ungrouped)))
     (mapc #'magpi-status--insert-action (nreverse ungrouped))
     (dolist (intention intentions)
-      (push (magpi-intention-id intention) known)
-      (magpi-status--insert-intention
-       intention (gethash (magpi-intention-id intention) groups)))
+      (cond
+       ((magpi-intention-p intention)
+        (push (magpi-intention-id intention) known)
+        (magpi-status--insert-intention
+         intention (gethash (magpi-intention-id intention) groups)))
+       ((magpi-unreadable-p intention)
+        (insert (magpi-status--face
+                 (format "    unreadable %s · %s"
+                         (file-name-nondirectory (magpi-unreadable-path intention))
+                         (magpi-unreadable-error intention))
+                 'magpi-status-alert)
+                "\n"))))
     ;; Keep in-memory actions visible if their persisted record is unreadable.
     (maphash
      (lambda (id grouped)
@@ -486,6 +504,8 @@ the owner can retain the shared intention."
 (define-derived-mode magpi-status-mode magit-mode "Magpi"
   "Magpi glance composed from Magit sections.  Depth is Magit; React intervenes."
   (setq-local truncate-lines nil)
+  (setq-local truncate-partial-width-windows nil)
+  (setq-local word-wrap t)
   ;; Magpi does not use Magit margins or diff hunk selection; those hooks
   ;; soft-depend on other Magit libraries and blow up if only magit-mode is loaded.
   (when (boundp 'magit-setup-buffer-hook)

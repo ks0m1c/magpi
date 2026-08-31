@@ -20,8 +20,14 @@ SEAM_LFLAGS = \
 	-L $(MAGPI_STRAIGHT_BUILD)/magit-section \
 	-L $(MAGPI_STRAIGHT_BUILD)/magit
 
-.PHONY: test test-unit test-seams test-emacs
 
+LIFE_LFLAGS = $(SEAM_LFLAGS) \
+	-L $(MAGPI_STRAIGHT_BUILD)/timeout \
+	-L $(MAGPI_STRAIGHT_BUILD)/spinner \
+	-L $(MAGPI_STRAIGHT_BUILD)/pcre2el \
+	-L $(MAGPI_STRAIGHT_BUILD)/pimacs
+
+.PHONY: test test-unit test-seams test-emacs test-life test-life-pi
 test: test-unit test-seams
 
 test-emacs: test
@@ -39,3 +45,19 @@ test-seams:
 		$(SEAM_LFLAGS) -L emacs -L emacs/test \
 		-l emacs/test/magpi-seam-tests.el \
 		-f ert-run-tests-batch-and-exit
+
+test-life:
+	@test -n "$(MAGPI_STRAIGHT_BUILD)" || { \
+	  echo "error: no straight build root; set MAGPI_STRAIGHT_BUILD"; exit 1; }
+	MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
+		$(LIFE_LFLAGS) -L emacs -L emacs/test \
+		-l emacs/test/magpi-life-play.el \
+		--eval "(magpi-life-play-run 'git)"
+
+test-life-pi:
+	@test -n "$(MAGPI_STRAIGHT_BUILD)" || { \
+	  echo "error: no straight build root; set MAGPI_STRAIGHT_BUILD"; exit 1; }
+	PI_OFFLINE=1 MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
+		$(LIFE_LFLAGS) -L emacs -L emacs/test \
+		-l emacs/test/magpi-life-play.el \
+		--eval "(magpi-life-play-run 'pi)"
