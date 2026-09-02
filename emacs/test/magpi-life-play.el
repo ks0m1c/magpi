@@ -222,13 +222,11 @@
       (unless (equal (magpi-action-chat-ref action) "c2aaaaaaaaaa")
         (error "chat-ref became %S" (magpi-action-chat-ref action)))
       (let ((suffix (magpi-status--heading-suffix action))
-            (glance (magpi-status--glance (magpi-action-observation action))))
-        (unless (string-match-p "\\bcold\\b" suffix)
+            (cold (magpi-status--auspice-motion 'cold)))
+        (unless (equal suffix cold)
           (error "glance suffix %S is not cold" suffix))
         (when (string-match-p "starting" suffix)
-          (error "glance painted starting"))
-        (when glance
-          (error "pending glance %S" glance))))))
+          (error "glance painted starting"))))))
 
 (defun magpi-play-C3-standalone-watermark ()
   (magpi-test-with-repo (root "magpi-life-C3-")
@@ -269,7 +267,7 @@
       (cl-letf (((symbol-function 'magpi-store-new-id) (lambda () "c4aaaaaaaaaa"))
                 ((symbol-function 'magpi--intention) (lambda (_id) intention)))
         (setq action (magpi-spawn-from-options
-                      '(:intention-id "intc4" :role writer :context-kind none))))
+                      '(:intention-id "intc4" :role writer :lease t :context-kind none))))
       (setq intention (gethash "intc4" magpi--intentions)
             lease (magpi-intention-writer-lease intention))
       (unless (equal (plist-get lease :action-id) "c4aaaaaaaaaa")
@@ -290,7 +288,7 @@
               (buffer-string)))
       (unless (string-match-p "Shared why" text)
         (error "intention glance missing"))
-      (unless (string-match-p "starting\\|cold\\|New task" text)
+      (unless (string-match-p (regexp-quote (magpi-status--auspice-motion 'lift)) text)
         (error "nested action glance missing: %s" text))
       (unless (equal (plist-get (magpi-intention-writer-lease intention) :action-id)
                      "c4aaaaaaaaaa")
@@ -378,17 +376,26 @@
              (unless (equal (plist-get state :sessionId) id)
                (error "D3 sessionId %S" (plist-get state :sessionId)))
              (magpi-play--record 'D3 'pass)
-             ;; D4 — Pimacs kills the agent on chat kill-buffer-hook.
+             ;; D4 — Pimacs may kill the agent on chat kill-buffer-hook.
+             ;; Either path must still land on the same session id.
              (magpi-play 'D4
-               (let ((old (magpi-pimacs-handle-chat-buffer handle)))
+               (let ((old (magpi-pimacs-handle-chat-buffer handle))
+                     state)
                  (kill-buffer old)
-                 (unless (magpi-backend-live-p magpi-backend handle)
-                   (error "D4 process died with buffer"))
-                 (magpi-backend-visit magpi-backend handle)
+                 (cond
+                  ((magpi-backend-live-p magpi-backend handle)
+                   (magpi-backend-visit magpi-backend handle))
+                  (t
+                   ;; Agent died with the buffer: same as cold/dead RET.
+                   (magpi--visit-or-open-action id)
+                   (setq handle (gethash id magpi--handles))
+                   (unless (magpi-play--wait
+                            (lambda ()
+                              (magpi-backend-live-p magpi-backend handle))
+                            8)
+                     (error "D4 not live after rebuild"))))
                  (unless (buffer-live-p (magpi-pimacs-handle-chat-buffer handle))
                    (error "D4 visit did not rebuild chat"))
-                 (unless (magpi-backend-live-p magpi-backend handle)
-                   (error "D4 live-p false after visit"))
                  (setq state (magpi-play--get-state handle))
                  (unless (equal (plist-get state :sessionId) id)
                    (error "D4 sessionId %S" (plist-get state :sessionId))))))
@@ -463,12 +470,17 @@
           (delete-directory root t))))))
 
 (cl-defun magpi-play-D6-hydrate-ret ()
+  "Cold hydrate then RET: same Pi session id, same file, no send-initial.
+
+Stand-in for Emacs death.  Proves older Action hooks the old chat via
+`--session-id = action-id`, not a fresh Pi session."
   (unless (magpi-play--pi-ready-p)
     (magpi-play--record 'D6 'skip "no pi/pimacs")
     (cl-return-from magpi-play-D6-hydrate-ret nil))
   (let* ((root (magpi-test-repo-create "magpi-life-D6-"))
          (sess (expand-file-name "sessions" root))
          (id "magpi-life-dddddddd")
+         (marker "magpi-life-old-chat-marker")
          ok)
     (unwind-protect
         (magpi-play--with-pi
@@ -476,11 +488,35 @@
          (lambda ()
            (let* ((born (magpi-play--spawn-action root id))
                   (handle (plist-get born :handle))
-                  loaded state)
+                  (birth-flags (plist-get born :flags))
+                  birth-file loaded state resume-flags chat)
+             (unless (equal (magpi-play--session-id-flags birth-flags) (list id))
+               (error "D6 birth flags --session-id %S" birth-flags))
              (unless (magpi-play--wait
                       (lambda () (magpi-backend-live-p magpi-backend handle))
                       8)
                (error "D6 birth not live"))
+             (setq state (magpi-play--get-state handle)
+                   birth-file (plist-get state :sessionFile)
+                   chat (magpi-pimacs-handle-chat-buffer handle))
+             (unless (equal (plist-get state :sessionId) id)
+               (error "D6 birth sessionId %S" (plist-get state :sessionId)))
+             (unless (magpi-play--file-under-p birth-file sess)
+               (error "D6 birth sessionFile %S not under %s" birth-file sess))
+             ;; Leave durable user text in the session without a model turn.
+             (with-current-buffer chat
+               (pimacs-send-prompt marker nil))
+             (unless (magpi-play--wait
+                      (lambda ()
+                        (and (stringp birth-file)
+                             (file-readable-p birth-file)
+                             (with-temp-buffer
+                               (insert-file-contents birth-file)
+                               (goto-char (point-min))
+                               (search-forward marker nil t))))
+                      6)
+               (error "D6 marker never landed in %s" birth-file))
+             ;; Emacs death stand-in: kill transport and forget theatre.
              (magpi-play--kill-agents)
              (clrhash magpi--actions)
              (clrhash magpi--handles)
@@ -488,28 +524,67 @@
                                       (and (magpi-action-p a)
                                            (equal (magpi-action-id a) id)))
                                     (magpi--actions-for-root root)))
+             (unless (magpi-action-p loaded)
+               (error "D6 cold glance missed action"))
              (unless (equal (magpi-action-chat-ref loaded) id)
                (error "D6 chat-ref %S" (magpi-action-chat-ref loaded)))
              (when (gethash id magpi--actions)
                (error "D6 paint wrote the registry"))
              (when (magpi-action-observation loaded)
                (error "D6 glance painted observation"))
+             (when (memq (magpi-observation-auspice
+                          (magpi-action-observation loaded))
+                         '(lift aloft))
+               (error "D6 glance painted in-flight auspice: %S"
+                      (magpi-observation-auspice
+                       (magpi-action-observation loaded))))
+             (unless (eq (magpi-observation-auspice
+                          (magpi-action-observation loaded))
+                         'cold)
+               (error "D6 glance not cold: %S / %s"
+                      (magpi-observation-auspice
+                       (magpi-action-observation loaded))
+                      (magpi-status--heading-suffix loaded)))
              (when (string-match-p "starting"
                                    (magpi-status--heading-suffix loaded))
-               (error "D6 glance painted starting"))
-             (magpi--visit-or-open-action id)
+               (error "D6 glance painted starting: %s"
+                      (magpi-status--heading-suffix loaded)))
+             ;; RET on cold Action must respawn with same --session-id, no initial.
+             (cl-letf (((symbol-function 'pimacs-chat)
+                        (let ((orig (symbol-function 'pimacs-chat)))
+                          (lambda (&rest args)
+                            (setq resume-flags (copy-sequence pimacs-flags))
+                            (apply orig args)))))
+               (magpi--visit-or-open-action id))
              (setq handle (gethash id magpi--handles))
+             (unless handle
+               (error "D6 RET produced no handle"))
+             (unless (equal (magpi-play--session-id-flags resume-flags) (list id))
+               (error "D6 RET flags --session-id %S" resume-flags))
+             (when (magpi-pimacs-handle-initial-sent handle)
+               (error "D6 send-initial fired on cold RET"))
              (unless (magpi-play--wait
                       (lambda () (magpi-backend-live-p magpi-backend handle))
                       8)
                (error "D6 RET not live"))
              (setq state (magpi-play--get-state handle))
              (unless (equal (plist-get state :sessionId) id)
-               (error "D6 minted %S" (plist-get state :sessionId))))
+               (error "D6 minted sessionId %S" (plist-get state :sessionId)))
+             (let ((again (plist-get state :sessionFile)))
+               (unless (magpi-play--file-under-p again sess)
+                 (error "D6 RET sessionFile %S not under %s" again sess))
+               (unless (equal (file-truename again) (file-truename birth-file))
+                 (error "D6 RET switched session file %S → %S" birth-file again))
+               (with-temp-buffer
+                 (insert-file-contents again)
+                 (goto-char (point-min))
+                 (unless (search-forward marker nil t)
+                   (error "D6 old chat marker missing after RET")))))
            (setq ok t)))
       (unless ok
         (message "Magpi play evidence retained: %s" root)
-        (message "sessions: %s" (magpi-play--jsonl sess)))
+        (message "sessions: %s" (magpi-play--jsonl sess))
+        (message "stderr: %s" (magpi-play--stderr)))
       (when ok
         (magpi-play--kill-agents)
         (when (file-directory-p root)

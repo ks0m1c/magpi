@@ -140,8 +140,21 @@
 (ert-deftest magpi-action-reduce-ignores-unknown-event-types ()
   (let* ((action (magpi-test-action))
          (again (magpi-action-reduce
-                 action '(:type usage-observed :usage (:input 1)))))
+                 action '(:type unicorn-observed :usage (:input 1)))))
     (should (eq again action))))
+
+(ert-deftest magpi-action-reduce-records-usage ()
+  (let* ((action (magpi-test-action))
+         (usage '(:input 12400 :output 3100 :cost 0.042 :context 9000
+                  :window 200000))
+         (observed (magpi-action-reduce
+                    action (list :type 'usage-observed :usage usage)))
+         (again (magpi-action-reduce
+                 observed (list :type 'usage-observed :usage usage))))
+    (should (equal (magpi-observation-usage
+                    (magpi-action-observation observed))
+                   usage))
+    (should (eq again observed))))
 
 (ert-deftest magpi-action-reduce-is-identity-for-restated-facts ()
   (let* ((action (magpi-action-reduce
@@ -168,8 +181,64 @@
                        named '(:type prompt-observed :prompt "Follow-up"))))
     (should (equal (magpi-observation-display-title
                    (magpi-action-observation prompt)) "First task"))
+    (should (equal (magpi-observation-last-prompt
+                   (magpi-action-observation prompt)) "First task"))
     (should (equal (magpi-observation-display-title
-                   (magpi-action-observation later-prompt)) "Named chat"))))
+                   (magpi-action-observation later-prompt)) "Named chat"))
+    (should (equal (magpi-observation-last-prompt
+                   (magpi-action-observation later-prompt)) "Follow-up"))))
+
+(ert-deftest magpi-observation-auspice-first-match ()
+  "Promise: auspice is a first-match projection of Observation, not a field."
+  (should (eq (magpi-observation-auspice nil) 'cold))
+  (should (eq (magpi-observation-auspice
+               (make-magpi-observation :connection-state 'disconnected))
+              'blood))
+  (should (eq (magpi-observation-auspice
+               (make-magpi-observation :activity-state 'unknown
+                                       :connection-state 'connected))
+              'blood))
+  (should (eq (magpi-observation-auspice
+               (make-magpi-observation :problem "extension error"
+                                       :activity-state 'starting
+                                       :connection-state 'connected))
+              'blood))
+  (should (eq (magpi-observation-auspice
+               (make-magpi-observation :activity-state 'starting
+                                       :connection-state 'connected))
+              'lift))
+  (should (eq (magpi-observation-auspice
+               (make-magpi-observation :activity-state 'running
+                                       :connection-state 'connected))
+              'aloft))
+  (should (eq (magpi-observation-auspice
+               (make-magpi-observation :activity-state 'idle
+                                       :connection-state 'connected))
+              'rest))
+  (should (eq (magpi-observation-auspice (make-magpi-observation)) 'cold))
+  (should (eq (magpi-observation-auspice (magpi-observation-initial)) 'lift)))
+
+(ert-deftest magpi-observation-auspice-ask-requested-does-not-recode ()
+  (let* ((action (magpi-test-action))
+         (asked (magpi-action-reduce
+                 action
+                 '(:type ask-requested
+                   :ask (:id "approval-1" :question "Apply?"))))
+         (running (magpi-action-reduce
+                   asked '(:type activity-started :activity "edit")))
+         (asked-running (magpi-action-reduce
+                         running
+                         '(:type ask-requested
+                           :ask (:id "approval-2" :question "Continue?")))))
+    (should (eq (magpi-observation-auspice (magpi-action-observation action))
+                'lift))
+    (should (eq (magpi-observation-auspice (magpi-action-observation asked))
+                'lift))
+    (should (eq (magpi-observation-auspice (magpi-action-observation running))
+                'aloft))
+    (should (eq (magpi-observation-auspice
+                 (magpi-action-observation asked-running))
+                'aloft))))
 
 (ert-deftest magpi-action-disk-omits-observation-and-keeps-chat-ref-monotonic ()
   "Promise: Action files store pointers, not theatre; chat-ref only advances."
@@ -188,9 +257,15 @@
       (setq loaded (magpi-action-load repository "act1"))
       (should (equal (magpi-action-intention-id loaded) "intent-1"))
       (should-not (magpi-action-observation loaded))
+      (should (eq (magpi-observation-auspice (magpi-action-observation loaded))
+                  'cold))
       (should-not (magpi-action-prompt loaded))
       (should (equal (magpi-action-chat-ref loaded) "act1"))
       (should (equal (plist-get (magpi-action-extras loaded) :future-field) "keep"))
+      (let ((data (magpi-store-read (magpi-store-file repository 'actions "act1"))))
+        (should-not (plist-member data :version))
+        (should-not (plist-member data :type))
+        (should-not (plist-member data :observation)))
       (should (eq loaded (magpi-action-set-chat-ref loaded "act1")))
       (should-error (magpi-action-set-chat-ref loaded "pimacs:other")))))
 
@@ -226,6 +301,8 @@
       (should (equal (magpi-action-spawn-oid action) oid))
       (should (equal (magpi-action-title action) "Standalone"))
       (should-not (magpi-action-intention-id action))
+      (should-not (plist-member (magpi-action--plist action) :intention-id))
+      (should-not (plist-member (magpi-action--plist action) :version))
       (should-not (plist-member (magpi-action--plist action) :observation)))))
 
 (provide 'magpi-action-tests)

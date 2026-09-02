@@ -36,7 +36,7 @@
       (magpi-test-repo-git
        (magpi-intention-worktree-path intention) "commit" "-m" "task result")
 
-      (setq intention (magpi-intention-add-action intention "task-1" 'writer))
+      (setq intention (magpi-intention-add-action intention "task-1" 'writer t))
       (should-error (magpi-intention-add-action intention "task-2" 'writer))
       (setq intention (magpi-intention-load repository "shared"))
       (should (eq (magpi-intention-state intention) 'active))
@@ -78,6 +78,23 @@
            (facts (magpi-intention-git-facts intention)))
       (should (eq (plist-get facts :checkout) 'missing))
       (should-not (plist-get facts :ahead)))))
+
+
+(ert-deftest magpi-intention-writers-share-until-exclusive-lease ()
+  "Promise: several writers share; W takes the lease and then refuses writers."
+  (magpi-test-with-repo (repository "magpi-intention-share-")
+    (let ((intention (magpi-intention-create-record "Share" repository "share")))
+      (setq intention (magpi-intention-add-action intention "a1" 'writer))
+      (setq intention (magpi-intention-add-action intention "a2" 'writer))
+      (should-not (magpi-intention-writer-lease intention))
+      (setq intention (magpi-intention-add-action intention "a3" 'writer t))
+      (should (equal (plist-get (magpi-intention-writer-lease intention) :action-id)
+                     "a3"))
+      (should-error (magpi-intention-add-action intention "a4" 'writer))
+      (should-error (magpi-intention-add-action intention "a5" 'writer t))
+      (setq intention (magpi-intention-add-action intention "a6" 'reader))
+      (should (equal (plist-get (magpi-intention-writer-lease intention) :action-id)
+                     "a3")))))
 
 (ert-deftest magpi-intention-is-lightweight-and-persists-file-and-chat-tags ()
   "Promise: bindings are references with tags; no worktree until work starts."
@@ -160,6 +177,8 @@
            (file (magpi-intention--file repository "extra"))
            data)
       (should (integerp (magpi-intention-created-at intention)))
+      (should-not (plist-member (magpi-intention--plist intention) :version))
+      (should-not (plist-member (magpi-intention--plist intention) :type))
       (setq data (plist-put (magpi-intention--plist intention) :future-field "keep"))
       (magpi-store-write file data)
       (setq intention (magpi-intention-load repository "extra"))
@@ -172,14 +191,38 @@
                                 :future-field)
                      "keep")))))
 
+(ert-deftest magpi-intention-local-files-are-forgiving ()
+  "Promise: :lifecycle still means state; classified leftovers are not extras."
+  (magpi-test-with-repo (repository "magpi-intention-forgive-")
+    (let ((file (magpi-intention--file repository "old")))
+      (make-directory (file-name-directory file) t)
+      (magpi-store-write
+       file
+       '(:id "old" :objective "Repair auth" :lifecycle discarded
+         :task-ids nil :source-root "/tmp/unused" :version 1))
+      (let ((intention (magpi-intention-load repository "old")))
+        (should (eq (magpi-intention-state intention) 'discarded))
+        (should (equal (magpi-intention-objective intention) "Repair auth"))
+        (should-not (plist-get (magpi-intention-extras intention) :lifecycle))
+        (magpi-intention-save intention)
+        (let ((data (magpi-store-read file)))
+          (should (eq (plist-get data :state) 'discarded))
+          (should-not (plist-member data :version))
+          (should-not (plist-member data :type))
+          (should-not (plist-member data :lifecycle))
+          (should-not (plist-member data :task-ids))
+          (should-not (plist-member data :source-root)))))))
+
 (ert-deftest magpi-intention-disk-omits-action-ids ()
   "Promise: membership is Action.intention-id, not an Intention cache."
   (magpi-test-with-repo (repository "magpi-intention-index-")
-    (let ((intention (magpi-intention-create-record "Index" repository "idx")))
+    (let ((intention (magpi-intention-create-record "Index" repository "idx"))
+          data)
       (setq intention (magpi-intention-add-action intention "act-1" 'writer))
-      (should-not (plist-member
-                   (magpi-store-read (magpi-intention--file repository "idx"))
-                   :action-ids)))))
+      (setq data (magpi-store-read (magpi-intention--file repository "idx")))
+      (should-not (plist-member data :action-ids))
+      (should-not (plist-member data :version))
+      (should-not (plist-member data :type)))))
 
 (ert-deftest magpi-intention-birth-freezes-base-oid-not-moving-ref ()
   "Promise: base-oid is birth; advancing the destination does not rewrite it."
@@ -283,6 +326,18 @@
       (should (seq-find (lambda (entry) (eq (plist-get entry :type) 'merge-started))
                         (magpi-intention-audit intention)))
       (should (eq (magpi-intention-state intention) 'merged)))))
+
+(ert-deftest magpi-intention-merge-refuses-missing-worktree ()
+  "Promise: a missing worktree is not a successful merge."
+  (magpi-test-with-repo (repository "magpi-intention-merge-missing-")
+    (let ((intention (make-magpi-intention
+                      :id "gone" :objective "Gone"
+                      :source-root repository
+                      :worktree-path (expand-file-name "absent" repository)
+                      :branch "magpi/gone" :base-ref "master"
+                      :state 'active)))
+      (should-error (magpi-intention-merge-record intention) :type 'user-error)
+      (should (eq (magpi-intention-state intention) 'active)))))
 
 (provide 'magpi-intention-tests)
 ;;; magpi-intention-tests.el ends here

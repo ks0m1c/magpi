@@ -8,17 +8,6 @@
 
 (require 'cl-lib)
 
-(defconst magpi-backend-event-types
-  '(activity-started activity-ended file-observed response-observed
-    title-observed model-observed disconnected problem-observed
-    ask-requested ask-updated ask-resolved)
-  "Documented Magpi semantic event vocabulary for adapter listeners.
-
-Events are plists. `activity-ended' may include `:idle t' when the adapter
-observes current idleness; it does not mean that an action is complete.
-Pi-ask events carry an `:ask' plist with an immutable `:id', optional
-`:parent-id', clear `:question', and `:affected-paths'.")
-
 (cl-defgeneric magpi-backend-spawn (backend action listener)
   "Launch ACTION, attach LISTENER, and return an opaque handle.
 
@@ -46,8 +35,9 @@ is a new action, never a restated prompt.")
 (cl-defgeneric magpi-backend-chat-candidates (backend root)
   "Return adapter-visible past chat references relevant to ROOT.
 
-Each candidate is a plist with stable `:reference' and display `:label'.  The
-reference is metadata only; binding it never loads or copies a transcript.")
+Each candidate is a plist with stable `:reference', display `:label', and
+optional `:last' assistant peek.  The reference is metadata only; binding it
+never loads or copies a transcript.")
 
 (cl-defmethod magpi-backend-chat-candidates ((_backend t) _root) nil)
 
@@ -65,6 +55,14 @@ not a deferred first open.")
 A chat buffer is UI, not liveness.")
 
 (cl-defmethod magpi-backend-live-p ((_backend t) _handle) nil)
+
+(cl-defgeneric magpi-backend-history-pending (backend handle)
+  "Return a glance label while HANDLE is filling session history, or nil.
+
+`get_entries' and lazy transcript paint are porcelain, not a model turn.
+Nil means nothing is filling; a string is a status meta mark only.")
+
+(cl-defmethod magpi-backend-history-pending ((_backend t) _handle) nil)
 
 (cl-defgeneric magpi-backend-send (backend handle message &optional mode)
   "Send MESSAGE to HANDLE, optionally using delivery MODE.")
@@ -87,11 +85,15 @@ Transport may still call this Pi approval; Magpi only speaks ask.")
 (cl-defgeneric magpi-backend-terminate (backend handle)
   "Terminate HANDLE when the adapter supports that operation.")
 
+(cl-defmethod magpi-backend-terminate ((_backend t) _handle)
+  nil)
+
 (cl-defgeneric magpi-backend-reconcile (backend handle listener)
   "Re-emit current observations for HANDLE through LISTENER.
 
 Used by an explicit status snapshot so facts that only exist as transport
-state (for example the running model from `get_state') stay visible without
+state (for example the running model from `get_state', tokens from
+`get_session_stats') stay visible without
 waiting for a later change event.  Event-driven paints must not call this:
 restated snapshots are not new facts, and feeding them back into the mailbox
 re-enters refresh.  Default is a no-op for adapters without snapshot state.

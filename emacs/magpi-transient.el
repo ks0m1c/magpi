@@ -5,9 +5,6 @@
 (require 'transient)
 (require 'magpi-launch)
 
-(defvar magpi-launch-intention-id nil
-  "Intention selected by `magpi-spawn-in-intention' for this dispatch.")
-
 (defvar magpi-launch-execute-function nil
   "Function of one options plist invoked by `magpi-launch-dispatch'.
 Installed by Magpi orchestration so the transient can autoload alone.")
@@ -59,7 +56,9 @@ Installed by Magpi orchestration so the transient can autoload alone.")
                        (magpi-launch-default-bind))))))
 
 (defun magpi-launch--options-from-args (args)
-  "Translate transient ARGS into a semantic options plist."
+  "Translate transient ARGS into a semantic options plist.
+
+Intention membership is Transient scope, not a special variable."
   (append
    (list :thinking (magpi-launch-thinking-from-label
                     (transient-arg-value "--thinking=" args))
@@ -68,14 +67,15 @@ Installed by Magpi orchestration so the transient can autoload alone.")
                      (transient-arg-value "--role=" args))
          :bind (magpi-launch-bind-from-label
                         (transient-arg-value "--context=" args)))
-   (when magpi-launch-intention-id
-     (list :intention-id magpi-launch-intention-id))))
+   (when (member "--lease" args)
+     (list :lease t))
+   (when-let ((id (and (fboundp 'transient-scope) (transient-scope))))
+     (list :intention-id id))))
 
 (defun magpi-launch-dispatch ()
   "Validate transient labels and hand semantic choices to Magpi orchestration."
   (interactive)
   (unless magpi-launch-execute-function
-    ;; `magpi-launch' is autoloaded from this file; orchestration lives in magpi.el.
     (require 'magpi)
     (unless magpi-launch-execute-function
       (user-error "Magpi spawn is not available")))
@@ -83,7 +83,7 @@ Installed by Magpi orchestration so the transient can autoload alone.")
            (magpi-launch--options-from-args (transient-args 'magpi-launch))))
 
 ;;;###autoload
-(transient-define-prefix magpi-launch ()
+(transient-define-prefix magpi-launch (intention-id)
   "Configure the single frozen specification for a Magpi action."
   :init-value #'magpi-launch--initial-values
   [["Model/Thinking"
@@ -91,14 +91,18 @@ Installed by Magpi orchestration so the transient can autoload alone.")
     ("t" "Thinking" "--thinking=" :reader magpi-launch--read-thinking)]
    ["Scope"
     ("c" "Bind" "--context=" :reader magpi-launch--read-context)
-    ;; Magit-form switches: format + regexp; class keeps the value always set.
     ("w" "Role (Writer/Reader)" "--role=" :class magpi-launch-role-switch
      :choices ("w" "r")
      :argument-format "--role=%s"
-     :argument-regexp "\\(--role=\\(w\\|r\\)\\)")]
+     :argument-regexp "\\(--role=\\(w\\|r\\)\\)")
+    ("W" "Exclusive writer" "--lease")]
    ["Spawn"
     ("s" "Spawn" magpi-launch-dispatch)
-    ("RET" "Spawn" magpi-launch-dispatch)]])
+    ("RET" "Spawn" magpi-launch-dispatch)]]
+  (interactive (list (and (featurep 'magpi-status)
+                          (fboundp 'magpi-section-intention-id)
+                          (magpi-section-intention-id))))
+  (transient-setup 'magpi-launch nil nil :scope intention-id))
 
 (provide 'magpi-transient)
 ;;; magpi-transient.el ends here

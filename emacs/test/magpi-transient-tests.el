@@ -44,9 +44,10 @@
             '("--thinking=Default"
               "--model=Inherit"
               "--context=Point"
-              "--role=w"))
+              "--role=w"
+              "--lease"))
            '(:thinking nil :model "Inherit"
-             :role writer :bind point))))
+             :role writer :bind point :lease t))))
 
 (ert-deftest magpi-launch-dispatch-delivers-options-to-executor ()
   "Promise: dispatch hands the semantic plist to the registered executor."
@@ -63,6 +64,19 @@
                    '(:thinking high :model "openai/gpt-4.1"
                      :role writer :bind none)))))
 
+(ert-deftest magpi-launch-options-include-selected-intention ()
+  "Promise: Transient scope becomes spawn membership, not a menu label."
+  (cl-letf (((symbol-function 'transient-scope) (lambda (&rest _) "intent-1")))
+    (should (equal (plist-get (magpi-launch--options-from-args
+                               '("--thinking=Default" "--model=Inherit"
+                                 "--context=None" "--role=w"))
+                              :intention-id)
+                   "intent-1")))
+  (cl-letf (((symbol-function 'transient-scope) (lambda (&rest _) nil)))
+    (should-not (plist-member (magpi-launch--options-from-args
+                               '("--thinking=Default" "--model=Inherit"
+                                 "--context=None" "--role=w"))
+                              :intention-id))))
 (ert-deftest magpi-launch-dispatch-refuses-missing-executor ()
   "Promise: missing orchestration is a user error, not void-function."
   (let ((magpi-launch-execute-function nil)

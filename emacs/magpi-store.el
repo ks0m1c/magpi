@@ -1,11 +1,12 @@
 ;;; magpi-store.el --- Repository-private plist records -*- lexical-binding: t; -*-
 
 ;; One job: read and write inert Magpi files.  Git names objects; this
-;; folder remembers Magpi's pointers.  Unknown keys survive.
-
+;; folder remembers Magpi's pointers.  Unknown keys survive.  Missing
+;; fields are absent; this store is local, not a protocol.
 (require 'cl-lib)
 (require 'subr-x)
 
+(defvar read-eval)
 (cl-defstruct magpi-unreadable path error)
 
 (defun magpi-store-unix-time ()
@@ -68,15 +69,28 @@
           (setq extras (nconc extras (list key value))))))
     extras))
 
+(defun magpi-store--omit-nils (plist)
+  "Return PLIST without nil values.  Absence is the local grammar."
+  (let (out)
+    (while plist
+      (let ((key (pop plist))
+            (value (pop plist)))
+        (when value
+          (push key out)
+          (push value out))))
+    (nreverse out)))
+
 (defun magpi-store-plist (named extras)
-  "Return NAMED followed by EXTRAS whose keys NAMED does not already hold."
+  "Return NAMED followed by EXTRAS whose keys NAMED does not already hold.
+Nil values are omitted."
   (let ((keys (let (keys plist)
                 (setq plist named)
                 (while plist
                   (push (pop plist) keys)
                   (pop plist))
                 keys)))
-    (append named (magpi-store-extras extras keys))))
+    (magpi-store--omit-nils
+     (append named (magpi-store-extras extras keys)))))
 
 (defun magpi-store-write (file plist)
   "Atomically replace FILE with PLIST.  The temporary lives beside FILE."

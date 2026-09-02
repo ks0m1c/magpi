@@ -20,8 +20,8 @@ Magpi does not replace its priors. It is porcelain over them, as Magit is over G
 | [Pimacs](https://github.com/ananthakumaran/pimacs.el) | chat, Pi session, protocol | one adapter |
 | [Pi](https://pi.dev) | the agent | spawn, observe, react to asks |
 
-`Package-Requires` is Emacs, Magit, and Pimacs. 
-Magit already pulls Transient and `magit-section`.  
+`Package-Requires` is Emacs, Magit, and Pimacs.
+Magit already pulls Transient and `magit-section`.
 
 ## Use
 
@@ -30,16 +30,20 @@ Magit already pulls Transient and `magit-section`.
 | Key | Meaning |
 |-----|---------|
 | `i` | create an intention |
-| `@` | bind the surface at point |
 | `s` | spawn an action |
+| `@` | bind context at point |
 | `RET` | intention → Magit; action → chat; ask → React |
+| `n` / `p` | next / previous last-seen chat |
 | `g` | reconcile and repaint |
+| `j` | toggle Active Perch |
 | `m` `d` `l` `c` | Magit status, diff, log, commit |
 | `a` | React |
+| `k` | discard chat / action / intention / worktree at point |
 | `?` `!` | pending ask, disconnection |
 
-Launch defaults to writer (`w`); press `w` for reader (`r`). The objective
-never enters chat — you author the task as the first message.
+Launch defaults to writer (`w`); press `w` for reader (`r`). `W` takes an
+exclusive writer lease; without it several writers may share an intention.
+The objective never enters chat — you author the task as the first message.
 
 ## Install
 
@@ -60,6 +64,9 @@ Have Magit and Pimacs first. Doom:
 make test          # unit + seams
 make test-unit     # no Magit package tree
 make test-seams    # real Magit + Transient
+make compile       # byte-compile Magpi; print warnings
+make xref          # unused symbols, unbound commands, isolation
+make instrument    # compile + xref
 ```
 
 ## Spec

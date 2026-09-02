@@ -14,12 +14,17 @@
   '((active . (merged discarded)))
   "Explicit intention transitions; merged and discarded are terminal.")
 
+(defconst magpi-intention-fields
+  '(:id :objective :bindings :worktree-path :branch :base-ref :base-oid
+    :state :writer-lease :audit :created-at)
+  "Coordinates Magpi persists.  Names keep their meaning.")
+
+(defconst magpi-intention-absorbed
+  '(:lifecycle :version :type :task-ids :action-ids :source-root)
+  "Classified names.  :lifecycle still reads as :state; the rest are not extras.")
+
 (defconst magpi-intention-keys
-  '(:version :type :id :objective :bindings :attachments
-    :worktree-path :branch :base-ref :base-oid :state :lifecycle
-    :action-ids :task-ids :writer-lease :audit :events :receipts
-    :source-root :created-at)
-  "Keys the intention decoder understands.  Other keys round-trip.")
+  (append magpi-intention-fields magpi-intention-absorbed))
 
 (cl-defstruct magpi-intention
   id objective bindings worktree-path branch base-ref base-oid state
@@ -28,9 +33,6 @@
 (defalias 'magpi-git #'magpi-store-git)
 (defalias 'magpi-git--maybe #'magpi-store-git-maybe)
 (defalias 'magpi-git--repository-root #'magpi-store-toplevel)
-
-(defun magpi-intention--store-directory (root)
-  (magpi-store-kind-directory root 'intentions))
 
 (defun magpi-intention--file (root id)
   (magpi-store-file root 'intentions id))
@@ -54,9 +56,7 @@
 (defun magpi-intention--plist (intention)
   "Return INTENTION as inert persisted data.  Root is the folder, not a field."
   (magpi-store-plist
-   (list :version 1
-         :type 'intention
-         :id (magpi-intention-id intention)
+   (list :id (magpi-intention-id intention)
          :objective (magpi-intention-objective intention)
          :bindings (magpi-intention-bindings intention)
          :worktree-path (or (magpi-store-relative
@@ -73,39 +73,24 @@
    (magpi-intention-extras intention)))
 
 (defun magpi-intention--from-plist (data root file)
-  "Decode persisted intention DATA living at FILE under ROOT."
+  "Decode persisted intention DATA living at FILE under ROOT.
+Folder and id are enough.  The only live alias is :lifecycle → :state."
   (when (magpi-unreadable-p data)
     (error "%s" (magpi-unreadable-error data)))
-  (let* ((version (plist-get data :version))
-         (type (plist-get data :type))
-         (id (plist-get data :id))
-         (state (or (plist-get data :state) (plist-get data :lifecycle)))
-         (lease (plist-get data :writer-lease))
-         (lease (cond
-                 ((and lease (plist-get lease :action-id)) lease)
-                 ((and lease (plist-get lease :task-id))
-                  (plist-put (copy-sequence lease) :action-id
-                             (plist-get lease :task-id)))
-                 (t lease))))
-    (unless (equal version 1)
-      (error "Unsupported Magpi intention version: %s" version))
-    (when (and type (not (eq type 'intention)))
-      (error "Not an intention record"))
-    (unless (and (magpi-store-id-ok id file)
-                 (stringp (plist-get data :objective)))
+  (let ((id (plist-get data :id)))
+    (unless (magpi-store-id-ok id file)
       (error "Invalid Magpi intention record"))
     (make-magpi-intention
      :id id
      :objective (plist-get data :objective)
-     :bindings (or (plist-get data :bindings) (plist-get data :attachments))
+     :bindings (plist-get data :bindings)
      :worktree-path (magpi-store-absolute root (plist-get data :worktree-path))
      :branch (plist-get data :branch)
      :base-ref (plist-get data :base-ref)
      :base-oid (plist-get data :base-oid)
-     :state state
-     :writer-lease lease
-     :audit (or (plist-get data :audit)
-                (append (plist-get data :events) (plist-get data :receipts)))
+     :state (or (plist-get data :state) (plist-get data :lifecycle))
+     :writer-lease (plist-get data :writer-lease)
+     :audit (plist-get data :audit)
      :source-root (file-name-as-directory (expand-file-name root))
      :created-at (and (plist-get data :created-at)
                       (magpi-intention--stamp (plist-get data :created-at)))
@@ -331,11 +316,16 @@ the intention record or sends it as task prose."
                                              :from current :to state :reason reason))
         (magpi-intention-save next)))))
 
-(defun magpi-intention-add-action (intention action-id role)
-  "Acquire ACTION-ID's writer lease when needed.  Membership is Action.intention-id."
+(defun magpi-intention-add-action (intention action-id role &optional exclusive)
+  "Record ACTION-ID on INTENTION.  EXCLUSIVE takes the writer lease.
+
+Writer without EXCLUSIVE may share the intention.  A held lease refuses
+every further writer.  Readers never take the lease."
   (unless (eq (magpi-intention-state intention) 'active)
     (user-error "Intention %s is %s" (magpi-intention-id intention)
                 (magpi-intention-state intention)))
+  (when (and exclusive (not (eq role 'writer)))
+    (user-error "Reader cannot take the writer lease"))
   (when (and (eq role 'writer) (magpi-intention-writer-lease intention))
     ;; Denial is audit, not a state transition for this intention.
     (let ((next (magpi-intention--append
@@ -346,7 +336,7 @@ the intention record or sends it as task prose."
     (user-error "Intention already has writer %s"
                 (plist-get (magpi-intention-writer-lease intention) :action-id)))
   (let ((next (copy-magpi-intention intention)))
-    (when (eq role 'writer)
+    (when exclusive
       (setf (magpi-intention-writer-lease next)
             (list :action-id action-id :acquired-at (magpi-store-unix-time))))
     (setq next (magpi-intention--append next 'action-added

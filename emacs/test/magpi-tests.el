@@ -5,7 +5,8 @@
 (require 'magpi-test-repo)
 
 (cl-defstruct magpi-test-backend
-  listener initial-sent action fail-initial fail-spawn ask-response visits spawn-count)
+  listener initial-sent action fail-initial fail-spawn ask-response visits
+  spawn-count terminated)
 
 (cl-defmethod magpi-backend-spawn ((backend magpi-test-backend) action listener)
   (setf (magpi-test-backend-action backend) action
@@ -43,6 +44,10 @@
 (cl-defmethod magpi-backend-live-p ((_backend magpi-test-backend) handle)
   (and handle (not (eq handle 'dead))))
 
+(cl-defmethod magpi-backend-terminate ((backend magpi-test-backend) handle)
+  (setf (magpi-test-backend-terminated backend)
+        (cons handle (magpi-test-backend-terminated backend))))
+
 (defmacro magpi-test-without-store (&rest body)
   "Keep spawn tests from reading or writing the author's .git/magpi."
   (declare (indent 0) (debug t))
@@ -72,6 +77,19 @@
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer))))))
 
+(ert-deftest magpi-history-pending-paints-without-minting-observation ()
+  (let* ((magpi--actions (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (action (make-magpi-action :id "cold-1" :chat-ref "cold-1")))
+    (unwind-protect
+        (progn
+          (puthash "cold-1" action magpi--actions)
+          (magpi--handle-event "cold-1" '(:type history-pending))
+          (should (eq (gethash "cold-1" magpi--actions) action))
+          (should-not (magpi-action-observation action))
+          (should (timerp magpi--refresh-timer)))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer)))))
 (ert-deftest magpi-spawn-failure-preserves-attributable-action-and-handle ()
   (magpi-test-without-store
   (let* ((backend (make-magpi-test-backend :fail-initial t))
@@ -216,32 +234,303 @@
 (ert-deftest magpi-routes-explicit-ask-answers-to-the-owning-handle ()
   (let* ((backend (make-magpi-test-backend))
          (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
          (magpi--handles (make-hash-table :test #'equal)))
+    (puthash "action-1"
+             (make-magpi-action
+              :id "action-1"
+              :observation (make-magpi-observation
+                            :activity-state 'running
+                            :connection-state 'connected
+                            :asks (list (make-magpi-ask
+                                         :id "approval-1"
+                                         :question "Apply?"
+                                         :state 'pending))))
+             magpi--actions)
     (puthash "action-1" 'test-handle magpi--handles)
-    (magpi--react-answer
-     'approved '(:kind ask :action-id "action-1" :ask-id "approval-1"))
+    (cl-letf (((symbol-function 'magpi--section-action-id)
+               (lambda (&optional _) "action-1"))
+              ((symbol-function 'magpi--section-ask-id)
+               (lambda (&optional _) "approval-1"))
+              ((symbol-function 'magpi-section-action-id)
+               (lambda (&optional _) "action-1"))
+              ((symbol-function 'magpi-section-ask-id)
+               (lambda (&optional _) "approval-1")))
+      (magpi--react-answer 'approved nil))
     (should (equal (magpi-test-backend-ask-response backend)
                    '("approval-1" approved)))))
 
-(ert-deftest magpi-root-target-visits-backend-root ()
+(defun magpi-test--surface-from-spec (spec)
+  "Infer bind surface from SPEC the way glance selectors would."
+  (cond
+   ((or (plist-get spec :path) (plist-get spec :ask) (plist-get spec :action))
+    'action)
+   ((plist-get spec :intention) 'intention)
+   (t 'root)))
+
+(defmacro magpi-test-at-section (spec &rest body)
+  "Bind Magpi effect-side section selectors from SPEC while BODY runs.
+
+Mocks magpi--section-* helpers so orchestration tests do not depend on
+eager glance load or Magit.  Public magpi-section-* symbols are mocked
+too for any direct calls."
+  (declare (indent 1))
+  (let ((surface (magpi-test--surface-from-spec spec)))
+    `(cl-letf (((symbol-function 'magpi--section-intention-id)
+                (lambda (&optional _) ,(plist-get spec :intention)))
+               ((symbol-function 'magpi--section-action-id)
+                (lambda (&optional _) ,(plist-get spec :action)))
+               ((symbol-function 'magpi--section-ask-id)
+                (lambda (&optional _) ,(plist-get spec :ask)))
+               ((symbol-function 'magpi--section-path)
+                (lambda (&optional _) ,(plist-get spec :path)))
+               ((symbol-function 'magpi--section-root)
+                (lambda (&optional _) ,(plist-get spec :root)))
+               ((symbol-function 'magpi--section-bind-surface)
+                (lambda (&optional _) ',surface))
+               ((symbol-function 'magpi-section-intention-id)
+                (lambda (&optional _) ,(plist-get spec :intention)))
+               ((symbol-function 'magpi-section-action-id)
+                (lambda (&optional _) ,(plist-get spec :action)))
+               ((symbol-function 'magpi-section-ask-id)
+                (lambda (&optional _) ,(plist-get spec :ask)))
+               ((symbol-function 'magpi-section-path)
+                (lambda (&optional _) ,(plist-get spec :path)))
+               ((symbol-function 'magpi-section-root)
+                (lambda (&optional _) ,(plist-get spec :root)))
+               ((symbol-function 'magpi-section-bind-surface)
+                (lambda (&optional _) ',surface)))
+       ,@body)))
+
+(defun magpi-tests-require-status ()
+  "Load glance paint helpers with the unit Magit shim when a test needs them.
+
+Orchestration no longer eagerly requires status; tests that call
+`magpi-status--heading*' must opt in explicitly."
+  (unless (boundp 'special-mode-map)
+    (defvar special-mode-map (make-sparse-keymap)))
+  (unless (require 'magit-mode nil t)
+    (defvar magit-mode-map (make-sparse-keymap))
+    (define-derived-mode magit-mode fundamental-mode "Magit")
+    (defun magit-refresh-buffer () nil)
+    (defmacro magit-setup-buffer (&rest _arguments) nil)
+    (provide 'magit-mode))
+  (unless (require 'magit-section nil t)
+    (defun magit-section-value-if (_type) nil)
+    (defun magit-current-section () nil)
+    (defun magit-section-toggle (_section) nil)
+    (defun magit-section-toggle-children (_section) nil)
+    (defun magit-section-show-headings (_section) nil)
+    (defmacro magit-insert-section (&rest body) `(progn ,@(cdr body)))
+    (defun magit-insert-heading (&rest arguments)
+      (insert (mapconcat #'identity arguments "") "\n"))
+    (provide 'magit-section))
+  (require 'magpi-status))
+
+(ert-deftest magpi-root-visits-backend-root ()
   (let (visited)
     (cl-letf (((symbol-function 'magpi-backend-visit-root)
                (lambda (_backend root) (setq visited root))))
       (let ((magpi-backend (make-magpi-test-backend)))
-        (magpi--visit-status-target '(:kind root :root "/tmp/project/"))
+        (magpi-test-at-section (:root "/tmp/project/")
+          (magpi-visit))
         (should (equal visited "/tmp/project/"))))))
 
+(ert-deftest magpi-spawn-passes-intention-to-launch-scope ()
+  "Promise: spawn hands lineage membership to Transient as an argument."
+  (let (scope validated)
+    (cl-letf (((symbol-function 'magpi--intention)
+               (lambda (id) (setq validated id) id))
+              ((symbol-function 'magpi-launch)
+               (lambda (&optional id) (setq scope id))))
+      (magpi-spawn "intent-1")
+      (should (equal validated "intent-1"))
+      (should (equal scope "intent-1"))
+      (setq validated nil)
+      (magpi-spawn)
+      (should-not validated)
+      (should-not scope))))
 
-(ert-deftest magpi-spawn-global-uses-status-target-at-point ()
-  (let (received)
-    (with-temp-buffer
-      (magpi-status-mode)
-      (cl-letf (((symbol-function 'magpi-status-target-at-point)
-                 (lambda () '(:kind root :root "/tmp/focused/")))
-                ((symbol-function 'magpi-launch)
-                 (lambda () (setq received 'launched))))
-        (magpi-spawn)
-        (should (eq received 'launched))))))
+(ert-deftest magpi-contextual-bind-surface-matrix ()
+  "Effect-side bind surface follows selectors; outside glance defaults to root."
+  (magpi-test-at-section (:intention "i")
+    (should (eq (magpi--section-bind-surface) 'intention)))
+  (magpi-test-at-section (:intention "i" :action "a")
+    (should (eq (magpi--section-bind-surface) 'action)))
+  (magpi-test-at-section (:action "a" :ask "q")
+    (should (eq (magpi--section-bind-surface) 'action)))
+  (magpi-test-at-section (:root "/tmp/")
+    (should (eq (magpi--section-bind-surface) 'root)))
+  (should (eq (magpi--section-bind-surface) 'root)))
+
+(ert-deftest magpi-contextual-visit-matrix ()
+  (let (route)
+    (cl-letf (((symbol-function 'magpi--changes-action)
+               (lambda (action &optional _section)
+                 (setq route (list 'magit action))))
+              ((symbol-function 'magpi-backend-visit-root)
+               (lambda (_backend root) (setq route (list 'root root))))
+              ((symbol-function 'magpi-react)
+               (lambda (&optional _section) (setq route '(react))))
+              ((symbol-function 'magpi--visit-or-open-action)
+               (lambda (id) (setq route (list 'chat id))))
+              ((symbol-function 'magpi--action)
+               (lambda (id) (make-magpi-action :id id :source-root "/tmp/project/")))
+              ((symbol-function 'magpi--action-root)
+               (lambda (_action) "/tmp/project/"))
+              ((symbol-function 'file-in-directory-p) (lambda (_file _root) t))
+              ((symbol-function 'find-file)
+               (lambda (file) (setq route (list 'file file)))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi-visit)
+        (should (equal route '(magit status))))
+      (magpi-test-at-section (:root "/tmp/project/")
+        (magpi-visit)
+        (should (equal route '(root "/tmp/project/"))))
+      (magpi-test-at-section (:action "a1" :ask "q1")
+        (magpi-visit)
+        (should (equal route '(react))))
+      (magpi-test-at-section (:action "a1" :ask "q1" :path "lib/auth.ex")
+        (magpi-visit)
+        (should (equal route '(react))))
+      (magpi-test-at-section (:action "a1")
+        (magpi-visit)
+        (should (equal route '(chat "a1"))))
+      (magpi-test-at-section (:action "a1" :path "lib/auth.ex")
+        (magpi-visit)
+        (should (eq (car route) 'file))
+        (should (string-suffix-p "lib/auth.ex" (cadr route)))))))
+
+(ert-deftest magpi-contextual-react-choices-matrix ()
+  (magpi-test-without-store
+    (let* ((magpi--actions (make-hash-table :test #'equal))
+           (magpi--intentions (make-hash-table :test #'equal))
+           (leased (make-magpi-intention
+                    :id "intent-1" :objective "Why" :state 'active
+                    :writer-lease '(:action-id "writer-1")))
+           (quiet (make-magpi-intention
+                   :id "intent-2" :objective "Done" :state 'active))
+           (ask (make-magpi-ask :id "q1" :question "Apply?" :state 'pending))
+           (asked (make-magpi-action
+                   :id "asked" :intention-id "intent-1"
+                   :observation (make-magpi-observation
+                                 :activity-state 'running
+                                 :connection-state 'connected
+                                 :asks (list ask))))
+           (answered (make-magpi-action
+                      :id "answered" :intention-id "intent-1"
+                      :observation (make-magpi-observation
+                                    :activity-state 'idle
+                                    :connection-state 'connected
+                                    :asks (list (make-magpi-ask
+                                                 :id "q2" :question "Done?"
+                                                 :state 'approved)))))
+           (blood (make-magpi-action
+                   :id "blood" :intention-id "intent-1"
+                   :observation (make-magpi-observation
+                                 :activity-state 'running
+                                 :connection-state 'disconnected
+                                 :asks (list ask)))))
+      (puthash "intent-1" leased magpi--intentions)
+      (puthash "intent-2" quiet magpi--intentions)
+      (puthash "asked" asked magpi--actions)
+      (puthash "answered" answered magpi--actions)
+      (puthash "blood" blood magpi--actions)
+      (cl-letf (((symbol-function 'magpi--intention)
+                 (lambda (id) (or (gethash id magpi--intentions)
+                                  (user-error "missing %s" id)))))
+        (magpi-test-at-section (:action "asked" :ask "q1" :intention "intent-1")
+          (should (equal (mapcar #'cdr (magpi-react--choices))
+                         '(approved rejected))))
+        (magpi-test-at-section (:action "asked" :intention "intent-1")
+          (should (equal (mapcar #'cdr (magpi-react--choices))
+                         '(approved rejected))))
+        (magpi-test-at-section (:action "answered" :ask "q2" :intention "intent-1")
+          (should-not (magpi-react--choices)))
+        (magpi-test-at-section (:action "blood" :ask "q1" :intention "intent-1")
+          (should (equal (mapcar #'cdr (magpi-react--choices))
+                         '(uncertainty))))
+        (magpi-test-at-section (:action "blood" :intention "intent-1")
+          (should (equal (mapcar #'cdr (magpi-react--choices))
+                         '(uncertainty))))
+        (magpi-test-at-section (:intention "intent-1")
+          (should (equal (mapcar #'cdr (magpi-react--choices))
+                         '(release))))
+        (magpi-test-at-section (:intention "intent-2")
+          (should (equal (mapcar #'cdr (magpi-react--choices))
+                         '(merge discard))))
+        (should-not (magpi-react--choices))
+        (should-error (magpi-react) :type 'user-error)))))
+
+(ert-deftest magpi-react-refuses-stale-ask-dead-handle-and-invented-success ()
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (ask (make-magpi-ask :id "q1" :question "Apply?" :state 'pending))
+         (action (make-magpi-action
+                  :id "action-1"
+                  :observation (make-magpi-observation
+                                :activity-state 'running
+                                :connection-state 'connected
+                                :asks (list ask)))))
+    (puthash "action-1" action magpi--actions)
+    (magpi-test-at-section (:action "action-1" :ask "q1")
+      (should-error (magpi--react-answer 'approved nil) :type 'user-error)
+      (should-not (magpi-test-backend-ask-response backend)))
+    (puthash "action-1" 'dead magpi--handles)
+    (magpi-test-at-section (:action "action-1" :ask "q1")
+      (should-error (magpi--react-answer 'approved nil) :type 'user-error)
+      (should-not (magpi-test-backend-ask-response backend)))
+    (puthash "action-1" 'test-handle magpi--handles)
+    (setf (magpi-ask-state ask) 'approved)
+    (magpi-test-at-section (:action "action-1" :ask "q1")
+      (should-error (magpi--react-answer 'approved nil) :type 'user-error)
+      (should-not (magpi-test-backend-ask-response backend)))
+    (setf (magpi-ask-state ask) 'pending)
+    (magpi-test-at-section (:action "action-1" :ask "q1")
+      (magpi--react-answer 'approved nil)
+      (should (equal (magpi-test-backend-ask-response backend)
+                     '("q1" approved)))
+      (should (eq (magpi-ask-state ask) 'pending)))))
+(ert-deftest magpi-contextual-changes-matrix ()
+  (magpi-test-without-store
+    (let* ((magpi--actions (make-hash-table :test #'equal))
+           (magpi--intentions (make-hash-table :test #'equal))
+           (intention (make-magpi-intention
+                       :id "intent-1" :objective "Why" :state 'active
+                       :worktree-path "/tmp/work/" :source-root "/tmp/project/"
+                       :base-ref "main" :branch "magpi/why"))
+           (alone (make-magpi-action :id "alone" :source-root "/tmp/project/"
+                                     :spawn-oid "abc"))
+           magit-root diff-range)
+      (puthash "intent-1" intention magpi--intentions)
+      (puthash "alone" alone magpi--actions)
+      (cl-letf (((symbol-function 'magpi--intention)
+                 (lambda (id) (gethash id magpi--intentions)))
+                ((symbol-function 'magpi-intention-work-range)
+                 (lambda (_intention) "main..magpi/why"))
+                ((symbol-function 'magit-status)
+                 (lambda (path) (setq magit-root path)))
+                ((symbol-function 'magit-diff-range)
+                 (lambda (range _args) (setq diff-range range)))
+                ((symbol-function 'magit-log-range) #'ignore)
+                ((symbol-function 'magpi--bind-magit-metadata) #'ignore)
+                ((symbol-function 'magpi-store-frozen-range)
+                 (lambda (_root oid _strict) (concat oid "..HEAD"))))
+        (magpi-test-at-section (:intention "intent-1")
+          (magpi--changes-action 'status)
+          (should (equal magit-root "/tmp/work/")))
+        (magpi-test-at-section (:intention "intent-1" :action "nested")
+          (magpi--changes-action 'diff)
+          (should (equal diff-range "main..magpi/why")))
+        (magpi-test-at-section (:action "alone")
+          (magpi--changes-action 'status)
+          (should (equal magit-root "/tmp/project/"))
+          (magpi--changes-action 'diff)
+          (should (equal diff-range "abc..HEAD"))
+          (should-error (magpi--changes-action 'commit) :type 'user-error))
+        (should-error (magpi--changes-action 'status) :type 'user-error)))))
 
 (ert-deftest magpi-command-map-is-the-global-return ()
   (should (eq (lookup-key magpi-command-map "m") #'magpi-status))
@@ -249,12 +538,38 @@
   (should (eq (lookup-key magpi-command-map "i") #'magpi-intention-create))
   (should (eq (lookup-key magpi-command-map "@")
               #'magpi-bind))
+  (should (eq (lookup-key magpi-command-map "k") #'magpi-discard))
   ;; Extra I/R/M stay off the primary map.
   (dolist (key '("I" "R" "M"))
     (should-not (lookup-key magpi-command-map key)))
   (should (eq (lookup-key (current-global-map) (kbd "C-c m"))
               magpi-command-map)))
 
+(defun magpi-test--chat-buffer (name)
+  (with-current-buffer (get-buffer-create name)
+    (setq major-mode 'pimacs-chat-mode)
+    (current-buffer)))
+
+(ert-deftest magpi-last-seen-action-ids-follow-live-chats ()
+  (let ((magpi--handles (make-hash-table :test #'equal))
+        a b hidden)
+    (unwind-protect
+        (progn
+          (setq a (magpi-test--chat-buffer "*magpi-chat-a*")
+                b (magpi-test--chat-buffer "*magpi-chat-b*")
+                hidden (magpi-test--chat-buffer " *magpi-hidden-chat*"))
+          (puthash "a" (make-magpi-pimacs-handle :id "a" :chat-buffer a)
+                   magpi--handles)
+          (puthash "b" (make-magpi-pimacs-handle :id "b" :chat-buffer b)
+                   magpi--handles)
+          (puthash "h" (make-magpi-pimacs-handle :id "h" :chat-buffer hidden)
+                   magpi--handles)
+          (cl-letf (((symbol-function 'magpi--live-chats)
+                     (lambda () (seq-filter #'buffer-live-p (list b a)))))
+            (should (equal (magpi-last-seen-action-ids) '("b" "a")))))
+      (dolist (buf (list a b hidden))
+        (when (buffer-live-p buf)
+          (kill-buffer buf))))))
 (ert-deftest magpi-disconnection-does-not-release-uncertain-writer-lease ()
   (let* ((id "writer-1")
          (intention (make-magpi-intention
@@ -294,9 +609,10 @@
                  owner))
               ((symbol-function 'magpi--schedule-refresh) #'ignore))
       (should-error
-       (magpi--react-release
-        '(:kind action :action-id "reader-1" :intention-id "intent-1")))
-      (magpi--react-release '(:kind intention :intention-id "intent-1"))
+       (magpi-test-at-section (:action "reader-1" :intention "intent-1")
+         (magpi--react-release)))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-release))
       (should (equal released (list intention "writer-1" "operator recovery"))))))
 
 (ert-deftest magpi-standalone-launch-leaves-task-for-chat ()
@@ -359,13 +675,13 @@
                      :writer-lease '(:action-id "writer-1")))
          (magpi--intentions (make-hash-table :test #'equal)))
     (puthash "intent-1" intention magpi--intentions)
-    (should (equal (mapcar #'cdr (magpi-react--choices
-                                  '(:kind intention :intention-id "intent-1")))
-                   '(release)))
+    (magpi-test-at-section (:intention "intent-1")
+      (should (equal (mapcar #'cdr (magpi-react--choices))
+                     '(release))))
     (setf (magpi-intention-writer-lease intention) nil)
-    (should (equal (mapcar #'cdr (magpi-react--choices
-                                  '(:kind intention :intention-id "intent-1")))
-                   '(merge discard)))))
+    (magpi-test-at-section (:intention "intent-1")
+      (should (equal (mapcar #'cdr (magpi-react--choices))
+                     '(merge discard))))))
 
 (ert-deftest magpi-react-merge-lands-in-magit-on-failure ()
   (let* ((intention (make-magpi-intention
@@ -382,7 +698,8 @@
               ((symbol-function 'magpi--land-magit)
                (lambda (directory) (setq landed directory))))
       (should-error
-       (magpi--react-merge '(:kind intention :intention-id "intent-1")))
+       (magpi-test-at-section (:intention "intent-1")
+         (magpi--react-merge)))
       (should (equal landed "/tmp/project/")))))
 
 (ert-deftest magpi-react-discard-names-force ()
@@ -399,10 +716,158 @@
               ((symbol-function 'magpi-intention-discard-record)
                (lambda (record) (setq discarded t) record))
               ((symbol-function 'magpi--schedule-refresh) #'ignore))
-      (magpi--react-discard '(:kind intention :intention-id "intent-1"))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-discard))
       (should discarded)
       (should (string-match-p "force-removes" prompt))
       (should (string-match-p "dirty" prompt)))))
+
+(ert-deftest magpi-discard-scope-is-contextual ()
+  "Promise: discard depth is innermost, like Magit hunk vs file vs list."
+  (magpi-test-at-section (:action "cold-1")
+    (should (eq (magpi-discard-scope) 'chat)))
+  (magpi-test-at-section (:action "a1" :intention "intent-1")
+    (should (eq (magpi-discard-scope) 'action)))
+  (magpi-test-at-section (:intention "intent-1")
+    (should (eq (magpi-discard-scope) 'intention)))
+  (magpi-test-at-section (:action "a1" :ask "q1" :intention "intent-1")
+    (should (eq (magpi-discard-scope) 'ask)))
+  (let ((magpi-intention-metadata '(:intention-id "intent-1")))
+    (cl-letf (((symbol-function 'magpi-discard--git-scope-p) (lambda () nil)))
+      (should (eq (magpi-discard-scope) 'worktree)))
+    (cl-letf (((symbol-function 'magpi-discard--git-scope-p) (lambda () t)))
+      (should-not (magpi-discard-scope)))))
+
+(ert-deftest magpi-discard-refuses-ask ()
+  (magpi-test-at-section (:action "a1" :ask "q1" :intention "intent-1")
+    (should-error (magpi-discard) :type 'user-error)))
+
+(ert-deftest magpi-discard-chat-keeps-writer ()
+  "Promise: chat depth terminates the agent and does not release the lease."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--intentions (make-hash-table :test #'equal))
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Keep why" :state 'active
+                     :writer-lease '(:action-id "cold-1")))
+         (action (make-magpi-action
+                  :id "cold-1" :intention-id nil
+                  :observation (make-magpi-observation :activity-state 'running))))
+    (puthash "intent-1" intention magpi--intentions)
+    (puthash "cold-1" action magpi--actions)
+    (puthash "cold-1" 'test-handle magpi--handles)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+              ((symbol-function 'magpi--schedule-refresh) #'ignore))
+      (magpi-test-at-section (:action "cold-1")
+        (magpi-discard)))
+    (should (equal (magpi-test-backend-terminated backend) '(test-handle)))
+    (should-not (gethash "cold-1" magpi--handles))
+    (should-not (magpi-action-observation (gethash "cold-1" magpi--actions)))
+    (should (equal (plist-get (magpi-intention-writer-lease
+                               (gethash "intent-1" magpi--intentions))
+                              :action-id)
+                   "cold-1"))))
+
+(ert-deftest magpi-discard-action-releases-writer ()
+  "Promise: action depth drops chat and releases this doing's writer."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--intentions (make-hash-table :test #'equal))
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :writer-lease '(:action-id "writer-1")))
+         (action (make-magpi-action
+                  :id "writer-1" :intention-id "intent-1"
+                  :observation (make-magpi-observation :activity-state 'running)))
+         released)
+    (puthash "intent-1" intention magpi--intentions)
+    (puthash "writer-1" action magpi--actions)
+    (puthash "writer-1" 'test-handle magpi--handles)
+    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+              ((symbol-function 'magpi--schedule-refresh) #'ignore)
+              ((symbol-function 'magpi--intention)
+               (lambda (id) (gethash id magpi--intentions)))
+              ((symbol-function 'magpi-intention-release-writer)
+               (lambda (record action-id reason)
+                 (setq released (list action-id reason))
+                 (let ((next (copy-magpi-intention record)))
+                   (setf (magpi-intention-writer-lease next) nil)
+                   next))))
+      (magpi-test-at-section (:action "writer-1" :intention "intent-1")
+        (magpi-discard)))
+    (should (equal (magpi-test-backend-terminated backend) '(test-handle)))
+    (should (equal released '("writer-1" "discard")))
+    (should-not (magpi-intention-writer-lease
+                 (gethash "intent-1" magpi--intentions)))
+    (should (eq (magpi-intention-state (gethash "intent-1" magpi--intentions))
+                'active))))
+
+(ert-deftest magpi-discard-intention-terminates-children ()
+  "Promise: intention depth is deep: nested theatre first, then force-remove."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--intentions (make-hash-table :test #'equal))
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Throw away" :state 'active
+                     :writer-lease '(:action-id "writer-1")))
+         (writer (make-magpi-action :id "writer-1" :intention-id "intent-1"))
+         (reader (make-magpi-action :id "reader-1" :intention-id "intent-1"))
+         prompt discarded released)
+    (puthash "intent-1" intention magpi--intentions)
+    (puthash "writer-1" writer magpi--actions)
+    (puthash "reader-1" reader magpi--actions)
+    (puthash "writer-1" 'writer-handle magpi--handles)
+    (puthash "reader-1" 'reader-handle magpi--handles)
+    (cl-letf (((symbol-function 'magpi-intention-git-facts)
+               (lambda (_intention) '(:checkout dirty)))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (p) (setq prompt p) t))
+              ((symbol-function 'magpi-intention-release-writer)
+               (lambda (record action-id _reason)
+                 (push action-id released)
+                 (let ((next (copy-magpi-intention record)))
+                   (setf (magpi-intention-writer-lease next) nil)
+                   next)))
+              ((symbol-function 'magpi-intention-discard-record)
+               (lambda (record)
+                 (setq discarded t)
+                 (let ((next (copy-magpi-intention record)))
+                   (setf (magpi-intention-state next) 'discarded)
+                   next)))
+              ((symbol-function 'magpi--schedule-refresh) #'ignore)
+              ((symbol-function 'magpi--intention)
+               (lambda (id) (gethash id magpi--intentions))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi-discard)))
+    (should discarded)
+    (should (member "writer-1" released))
+    (should (memq 'reader-handle (magpi-test-backend-terminated backend)))
+    (should (memq 'writer-handle (magpi-test-backend-terminated backend)))
+    (should (= 2 (length (magpi-test-backend-terminated backend))))
+    (should-not (gethash "writer-1" magpi--handles))
+    (should (eq (magpi-intention-state (gethash "intent-1" magpi--intentions))
+                'discarded))
+    (should (string-match-p "force-removes" prompt))
+    (should (string-match-p "2 actions" prompt))))
+
+(ert-deftest magpi-discard-magit-hunk-delegates ()
+  "Promise: Magit hunk/file/list stay Magit discard."
+  (let (called)
+    (cl-letf (((symbol-function 'derived-mode-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'magpi-discard--git-scope-p) (lambda () t))
+              ((symbol-function 'magit-discard)
+               (lambda () (setq called t)))
+              ((symbol-function 'call-interactively)
+               (lambda (fn) (funcall fn))))
+      (magpi-discard)
+      (should called))))
 
 (ert-deftest magpi-spawn-spec-freezes-chat-ref-to-action-id ()
   (magpi-test-without-store
@@ -438,7 +903,7 @@
     (unwind-protect
         (progn
           (puthash "cold-1" action magpi--actions)
-          (magpi--visit-status-target '(:kind action :action-id "cold-1"))
+          (magpi-test-at-section (:action "cold-1") (magpi-visit))
           (should (eq (gethash "cold-1" magpi--handles) 'test-handle))
           (should-not (magpi-test-backend-initial-sent backend))
           (should-not (magpi-action-started-at (gethash "cold-1" magpi--actions)))
@@ -455,7 +920,7 @@
          (magpi--handles (make-hash-table :test #'equal)))
     (puthash "live-1" (make-magpi-action :id "live-1") magpi--actions)
     (puthash "live-1" 'test-handle magpi--handles)
-    (magpi--visit-status-target '(:kind action :action-id "live-1"))
+    (magpi-test-at-section (:action "live-1") (magpi-visit))
     (should-not (magpi-test-backend-action backend))
     (should (equal (magpi-test-backend-visits backend) '(test-handle)))))
 
@@ -474,7 +939,7 @@
         (progn
           (puthash "dead-1" action magpi--actions)
           (puthash "dead-1" 'dead magpi--handles)
-          (magpi--visit-status-target '(:kind action :action-id "dead-1"))
+          (magpi-test-at-section (:action "dead-1") (magpi-visit))
           (should (eq (gethash "dead-1" magpi--handles) 'test-handle))
           (should-not (magpi-test-backend-initial-sent backend))
           (should-not (magpi-action-started-at (gethash "dead-1" magpi--actions)))
@@ -656,8 +1121,15 @@
       (should-not (eq ram joined))
       (should-not (magpi-action-observation joined))
       (should-not (gethash id magpi--actions))
-      (should (string-match-p "\\bcold\\b"
-                              (magpi-status--heading-suffix joined))))))
+      ;; Heading paint is status-owned; opt in explicitly (no eager magpi require).
+      (magpi-tests-require-status)
+      (should (equal (magpi-status--heading-suffix joined)
+                     (mapconcat #'identity
+                                (delq nil
+                                      (list (magpi-status--auspice-motion 'cold)
+                                            (magpi-status--age-label
+                                             (magpi-action-created-at joined))))
+                                " · "))))))
 
 (ert-deftest magpi-intention-commands-reread-disk ()
   "Promise: effects load Intention coordinates; stale RAM does not win."
@@ -673,5 +1145,50 @@
         (should (equal (magpi-intention-objective (magpi--intention "reread"))
                        "Disk why"))))))
 
+
+(ert-deftest magpi-chat-candidate-label-matches-action-id ()
+  (let* ((action (make-magpi-action :id "hist-1" :chat-ref "hist-1"))
+         (candidates '((:reference "pimacs:other" :label "Nope")
+                       (:reference "pimacs:hist-1" :label "Historical why"))))
+    (should (equal (magpi--chat-candidate-label-for-action action candidates)
+                   "Historical why"))
+    (should-not (magpi--chat-candidate-label-for-action
+                 (make-magpi-action :id "missing")
+                 candidates))))
+
+(ert-deftest magpi-historical-action-titles-reconstruct-from-sessions ()
+  "Promise: fresh Emacs rebuilds durable action titles from Pi sessions."
+  (magpi-tests-require-status)
+  (let* ((root (expand-file-name "/home/putra/.doom.d/magpi"))
+         (store (expand-file-name "~/.pi/agent/sessions"))
+         (actions-dir (expand-file-name ".git/magpi/actions" root)))
+    (skip-unless (file-directory-p actions-dir))
+    (skip-unless (file-directory-p store))
+    (let* ((process-environment
+            (cons (format "PI_CODING_AGENT_SESSION_DIR=%s" store)
+                  process-environment))
+           (pimacs-flags nil)
+           (candidates (magpi-backend-chat-candidates
+                        (make-magpi-pimacs-backend) root))
+           (actions (magpi-action-list root))
+           (titled 0))
+      (should (consp candidates))
+      (dolist (action actions)
+        (when (magpi-action-p action)
+          (let* ((label (magpi--chat-candidate-label-for-action action candidates))
+                 (magpi-status-action-title-function (lambda (a) label))
+                 (heading (substring-no-properties (magpi-status--heading action)))
+                 (suffix (magpi-status--heading-suffix action)))
+            (should (string-prefix-p (magpi-status--auspice-motion 'cold) suffix))
+            (should-not (magpi-action-observation action))
+            (when label
+              (setq titled (1+ titled))
+              (should (or (equal heading label)
+                          (and (string-suffix-p "…" heading)
+                               (string-prefix-p (substring heading 0 -1) label))))
+              (should-not (string-match-p "\\`New chat" heading))
+              (should-not (string-match-p "\\`New task" heading))))))
+      ;; Eleven of twelve durable actions currently have matching sessions.
+      (should (>= titled 11)))))
 (provide 'magpi-tests)
 ;;; magpi-tests.el ends here

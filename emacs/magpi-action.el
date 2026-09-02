@@ -15,7 +15,8 @@ React answers it; status only glances.  `question' is the ask text."
 
 (cl-defstruct magpi-observation
   display-title activity-state connection-state activity
-  running-model observed-files last-response problem asks)
+  running-model observed-files last-response problem asks
+  last-prompt usage)
 
 (cl-defstruct magpi-action
   id title prompt intention-id launch observation started-at
@@ -24,6 +25,23 @@ React answers it; status only glances.  `question' is the ask text."
   "Return the initial observation for a newly declared action."
   (make-magpi-observation :activity-state 'starting
                           :connection-state 'connected))
+
+(defun magpi-observation-auspice (observation)
+  "Project OBSERVATION to a glance auspice.  Not stored.
+
+Nil is cold.  Disconnect, unknown activity, or a problem is blood.
+Starting is lift; running is aloft; idle is rest; otherwise cold.
+Pending asks do not recode.  A kernel without theatre is cold, never lift."
+  (cond
+   ((null observation) 'cold)
+   ((or (eq (magpi-observation-connection-state observation) 'disconnected)
+        (eq (magpi-observation-activity-state observation) 'unknown)
+        (magpi-observation-problem observation))
+    'blood)
+   ((eq (magpi-observation-activity-state observation) 'starting) 'lift)
+   ((eq (magpi-observation-activity-state observation) 'running) 'aloft)
+   ((eq (magpi-observation-activity-state observation) 'idle) 'rest)
+   (t 'cold)))
 
 (defun magpi-observation-same-p (left right)
   "Return non-nil when LEFT and RIGHT carry the same observed facts.
@@ -46,10 +64,14 @@ duplicate event cannot look like progress and re-enter the refresh loop."
                   (magpi-observation-observed-files right))
            (equal (magpi-observation-last-response left)
                   (magpi-observation-last-response right))
+           (equal (magpi-observation-last-prompt left)
+                  (magpi-observation-last-prompt right))
            (equal (magpi-observation-problem left)
                   (magpi-observation-problem right))
            (equal (magpi-observation-asks left)
-                  (magpi-observation-asks right)))))
+                  (magpi-observation-asks right))
+           (equal (magpi-observation-usage left)
+                  (magpi-observation-usage right)))))
 
 (defun magpi-observation--add-file (observation path)
   "Add already-normalized project-relative PATH to OBSERVATION once."
@@ -148,10 +170,12 @@ identity-preserving and skip effects.  Unknown event types are ignored."
        (setf (magpi-observation-last-response observation)
              (magpi--one-line (plist-get event :text))))
       ('prompt-observed
-       (unless (magpi-observation-display-title observation)
-         (let ((prompt (plist-get event :prompt)))
-           (when (and (stringp prompt)
-                      (not (string-empty-p (string-trim prompt))))
+       (let ((prompt (plist-get event :prompt)))
+         (when (and (stringp prompt)
+                    (not (string-empty-p (string-trim prompt))))
+           (setf (magpi-observation-last-prompt observation)
+                 (magpi--one-line prompt))
+           (unless (magpi-observation-display-title observation)
              (setf (magpi-observation-display-title observation) prompt)))))
       ('title-observed
        (let ((title (plist-get event :title)))
@@ -168,6 +192,10 @@ identity-preserving and skip effects.  Unknown event types are ignored."
       ((or 'ask-requested 'ask-updated 'ask-resolved)
        ;; Pi-ask facts are structured observation data; chat prose never changes them.
        (setq observation (magpi-observation--upsert-ask observation event)))
+      ('usage-observed
+       (when-let ((usage (plist-get event :usage)))
+         (when (listp usage)
+           (setf (magpi-observation-usage observation) usage))))
       ('disconnected
        (setf (magpi-observation-connection-state observation) 'disconnected
              (magpi-observation-activity-state observation) 'unknown
@@ -178,39 +206,35 @@ identity-preserving and skip effects.  Unknown event types are ignored."
         (setf (magpi-action-observation next) observation)
         next))))
 
+(defconst magpi-action-fields
+  '(:id :intention-id :chat-ref :title :created-at :spawn-oid)
+  "Coordinates Magpi persists.  Names keep their meaning.")
+
+(defconst magpi-action-absorbed
+  '(:version :type :source-root)
+  "Classified envelope leftovers.  Not extras; never re-emitted.")
+
 (defconst magpi-action-keys
-  '(:version :type :id :intention-id :chat-ref :title :created-at
-    :source-root :spawn-oid :spawn-ref)
-  "Keys the action decoder understands.  Other keys round-trip.")
+  (append magpi-action-fields magpi-action-absorbed))
 
 (defun magpi-action--plist (action)
   "Return ACTION as inert persisted data.  Observation and launch stay RAM."
   (let ((intention-id (magpi-action-intention-id action)))
     (magpi-store-plist
      (append
-      (list :version 1
-            :type 'action
-            :id (magpi-action-id action)
+      (list :id (magpi-action-id action)
             :intention-id intention-id
             :chat-ref (magpi-action-chat-ref action)
             :created-at (magpi-action-created-at action))
       (unless intention-id
-        (append (when-let ((title (magpi-action-title action)))
-                  (list :title title))
-                (when-let ((oid (magpi-action-spawn-oid action)))
-                  (list :spawn-oid oid)))))
+        (list :title (magpi-action-title action)
+              :spawn-oid (magpi-action-spawn-oid action))))
      (magpi-action-extras action))))
 
 (defun magpi-action--from-plist (data root file)
   (when (magpi-unreadable-p data)
     (error "%s" (magpi-unreadable-error data)))
-  (let ((version (plist-get data :version))
-        (type (plist-get data :type))
-        (id (plist-get data :id)))
-    (unless (equal version 1)
-      (error "Unsupported Magpi action version: %s" version))
-    (when (and type (not (eq type 'action)))
-      (error "Not an action record"))
+  (let ((id (plist-get data :id)))
     (unless (magpi-store-id-ok id file)
       (error "Invalid Magpi action record"))
     (make-magpi-action

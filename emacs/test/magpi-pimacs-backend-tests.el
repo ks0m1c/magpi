@@ -163,11 +163,15 @@
 
 (ert-deftest magpi-pimacs-backend-spawn-does-not-pull-snapshots ()
   (magpi-pimacs-test-with-backend
-   (magpi-backend-spawn (make-magpi-pimacs-backend)
-                       (magpi-pimacs-test-action) #'ignore)
-   (should-not (magpi-pimacs-test--callback "get_state"))
-   (should-not (magpi-pimacs-test--callback "get_session_stats"))
-   (should-not (magpi-pimacs-test--callback "get_available_models"))))
+   (let (refreshed)
+     (cl-letf (((symbol-function 'pimacs-refresh-session)
+                (lambda (&optional _) (setq refreshed t))))
+       (magpi-backend-spawn (make-magpi-pimacs-backend)
+                            (magpi-pimacs-test-action) #'ignore)
+       (should-not refreshed)
+       (should-not (magpi-pimacs-test--callback "get_state"))
+       (should-not (magpi-pimacs-test--callback "get_session_stats"))
+       (should-not (magpi-pimacs-test--callback "get_available_models"))))))
 
 (ert-deftest magpi-pimacs-backend-fill-catalog-from-a-handle ()
   (magpi-pimacs-test-with-backend
@@ -254,7 +258,7 @@
      (setq magpi-pimacs-test--commands nil)
      (magpi-backend-reconcile backend handle #'ignore)
      (should (equal (mapcar #'car magpi-pimacs-test--commands)
-                    '("get_state"))))))
+                    '("get_session_stats" "get_state"))))))
 
 (ert-deftest magpi-pimacs-backend-settled-does-not-request-usage ()
   (magpi-pimacs-test-with-backend
@@ -269,6 +273,34 @@
      (should-not magpi-pimacs-test--commands)
      (should (equal received '((:type activity-ended :idle t)))))))
 
+(ert-deftest magpi-pimacs-backend-normalizes-session-stats ()
+  (should-not (magpi-pimacs--normalize-usage nil))
+  (should-not (magpi-pimacs--normalize-usage '(:tokens json-null)))
+  (should (equal (magpi-pimacs--normalize-usage
+                  '(:tokens (:input 12 :output 3 :total 15)
+                    :cost 0.01
+                    :contextUsage (:tokens 40 :contextWindow 200000)))
+                 '(:input 12 :output 3 :total 15 :cost 0.01
+                   :context 40 :window 200000))))
+
+(ert-deftest magpi-pimacs-backend-reconciles-usage ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          received
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       #'ignore)))
+     (setq magpi-pimacs-test--commands nil)
+     (magpi-backend-reconcile backend handle
+                              (lambda (event) (setq received event)))
+     (funcall (magpi-pimacs-test--callback "get_session_stats")
+              '(:success t
+                :data (:tokens (:input 12400 :output 3100 :total 15500)
+                       :cost 0.042
+                       :contextUsage (:tokens 9000 :contextWindow 200000))))
+     (should (equal received
+                    '(:type usage-observed
+                      :usage (:input 12400 :output 3100 :total 15500
+                              :cost 0.042 :context 9000 :window 200000)))))))
 (ert-deftest magpi-pimacs-backend-registers-catalog-filler ()
   (should (eq magpi-launch-catalog-refresh-function
               #'magpi-pimacs-fill-catalog)))
@@ -348,9 +380,232 @@
           (old (magpi-pimacs-handle-chat-buffer handle)))
      (kill-buffer old)
      (should-not (buffer-live-p old))
-     (magpi-backend-visit backend handle)
-     (should (buffer-live-p (magpi-pimacs-handle-chat-buffer handle)))
-     (should (equal magpi-pimacs-test--name "Agent · action-1234")))))
+     (unwind-protect
+         (progn
+           (magpi-backend-visit backend handle)
+           (should (buffer-live-p (magpi-pimacs-handle-chat-buffer handle)))
+           (should (equal magpi-pimacs-test--name "Agent · action-1234")))
+       (magpi-pimacs--history-watch-stop handle)))))
+
+(ert-deftest magpi-pimacs-backend-visit-pulls-session-history ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       #'ignore))
+          refreshed)
+     (unwind-protect
+         (cl-letf (((symbol-function 'pimacs-refresh-session)
+                    (lambda (&optional callback)
+                      (setq refreshed (current-buffer))
+                      (when callback (funcall callback)))))
+           (magpi-backend-visit backend handle)
+           (should (eq refreshed (magpi-pimacs-handle-chat-buffer handle)))
+           (should-not (magpi-pimacs-handle-awaiting-entries handle)))
+       (magpi-pimacs--history-watch-stop handle)))))
+
+(ert-deftest magpi-pimacs-backend-visit-skips-history-when-already-shown ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       #'ignore))
+          refreshed)
+     (cl-letf (((symbol-function 'magpi-pimacs--history-rendered-p)
+                (lambda (&optional _) t))
+               ((symbol-function 'pimacs-refresh-session)
+                (lambda (&optional _) (setq refreshed t))))
+       (magpi-backend-visit backend handle)
+       (should-not refreshed)))))
+
+(ert-deftest magpi-pimacs-backend-history-fill-is-loading-not-a-turn ()
+  (magpi-pimacs-test-with-backend
+   (let* (events
+          (backend (make-magpi-pimacs-backend))
+          (handle (magpi-backend-spawn backend (magpi-pimacs-test-action)
+                                       (lambda (event) (push event events)))))
+     (unwind-protect
+         (cl-letf (((symbol-function 'pimacs-refresh-session)
+                    (lambda (&optional _) nil)))
+           (magpi-backend-visit backend handle)
+           (should (magpi-pimacs-handle-awaiting-entries handle))
+           (should (equal (magpi-backend-history-pending backend handle)
+                          "loading"))
+           (should (equal (car events) '(:type history-pending)))
+           (setf (magpi-pimacs-handle-awaiting-entries handle) nil)
+           (with-current-buffer (magpi-pimacs-handle-chat-buffer handle)
+             (setq-local pimacs--history-render-pending '((a b c))))
+           (should (equal (magpi-backend-history-pending backend handle)
+                          "loading 3")))
+       (magpi-pimacs--history-watch-stop handle)))))
+(ert-deftest magpi-pimacs-session-label-prefers-meaningful-name ()
+  (should (equal (magpi-pimacs--session-label "Repair auth" "ignored first"
+                                              "later user")
+                 "Repair auth"))
+  (should (equal (magpi-pimacs--session-label "New chat · deadbeef" "First user"
+                                              "Later user")
+                 "First user"))
+  (should (equal (magpi-pimacs--session-label "New task · deadbeef" "First user")
+                 "First user"))
+  (should (equal (magpi-pimacs--session-label "◯ · deadbeef" nil "Later user")
+                 "Later user"))
+  (should-not (magpi-pimacs--session-label "New chat · deadbeef" "   ")))
+
+(ert-deftest magpi-pimacs-read-session-file-peeks-user-then-last-assistant ()
+  (let* ((dir (make-temp-file "magpi-session-dir" t))
+         (file (expand-file-name "2026-01-01T00-00-00-000Z_sess-1.jsonl" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert
+             (concat
+              "{\"type\":\"session\",\"id\":\"sess-1\",\"cwd\":\"/tmp/proj\"}\n"
+              "{\"type\":\"session_info\",\"name\":\"New chat · sess-1\"}\n"
+              "{\"type\":\"message\",\"message\":{\"role\":\"assistant\","
+              "\"content\":[{\"type\":\"text\",\"text\":\"Nope\"}]}}\n"
+              "{\"type\":\"message\",\"message\":{\"role\":\"user\","
+              "\"content\":[{\"type\":\"text\",\"text\":\"Real task\"}]}}\n"
+              "{\"type\":\"message\",\"message\":{\"role\":\"assistant\","
+              "\"content\":[{\"type\":\"text\",\"text\":\"Last activity\"}]}}\n")))
+          (let ((session (magpi-pimacs--read-session-file file)))
+            (should (equal (plist-get session :id) "sess-1"))
+            (should (equal (plist-get session :first-user) "Real task"))
+            (should (equal (plist-get session :last-user) "Real task"))
+            (should (equal (plist-get session :last-activity) "Last activity"))
+            (should (equal (magpi-pimacs--session-label
+                            (plist-get session :name)
+                            (plist-get session :first-user)
+                            (plist-get session :last-user))
+                           "Real task"))))
+      (when (file-directory-p dir) (delete-directory dir t)))))
+
+(ert-deftest magpi-pimacs-chat-candidates-read-disk-without-spawn ()
+  (let* ((store (make-temp-file "magpi-sessions" t))
+         (root (file-name-as-directory (make-temp-file "magpi-root" t)))
+         (project (expand-file-name (magpi-pimacs--encode-cwd root) store))
+         (id "hist-1")
+         (file (expand-file-name (format "2026-01-01T00-00-00-000Z_%s.jsonl" id)
+                                 project))
+         (pimacs-flags nil)
+         (process-environment
+          (cons (format "PI_CODING_AGENT_SESSION_DIR=%s" store)
+                process-environment))
+         spawned)
+    (unwind-protect
+        (progn
+          (make-directory project t)
+          (with-temp-file file
+            (insert
+             (format
+              (concat
+               "{\"type\":\"session\",\"id\":\"%s\",\"cwd\":\"%s\"}\n"
+               "{\"type\":\"session_info\",\"name\":\"New chat · %s\"}\n"
+               "{\"type\":\"message\",\"message\":{\"role\":\"user\","
+               "\"content\":[{\"type\":\"text\",\"text\":\"Historical why\"}]}}\n")
+              id (directory-file-name root) id)))
+          (cl-letf (((symbol-function 'pimacs-chat)
+                     (lambda (&rest _) (setq spawned t))))
+            (let ((candidates (magpi-backend-chat-candidates
+                               (make-magpi-pimacs-backend) root)))
+              (should-not spawned)
+              (should (equal candidates
+                             (list (list :reference "pimacs:hist-1"
+                                         :label "Historical why")))))))
+      (when (file-directory-p store) (delete-directory store t))
+      (when (file-directory-p root) (delete-directory root t)))))
+
+(ert-deftest magpi-pimacs-chat-candidates-order-by-last-activity ()
+  (let* ((store (make-temp-file "magpi-sessions" t))
+         (root (file-name-as-directory (make-temp-file "magpi-root" t)))
+         (project (expand-file-name (magpi-pimacs--encode-cwd root) store))
+         (old (expand-file-name "2026-01-01T00-00-00-000Z_old-1.jsonl" project))
+         (new (expand-file-name "2026-01-02T00-00-00-000Z_new-1.jsonl" project))
+         (process-environment
+          (cons (format "PI_CODING_AGENT_SESSION_DIR=%s" store)
+                process-environment)))
+    (unwind-protect
+        (progn
+          (make-directory project t)
+          (cl-labels ((write-session (file id text)
+                        (with-temp-file file
+                          (insert (format
+                                   (concat
+                                    "{\"type\":\"session\",\"id\":\"%s\",\"cwd\":\"%s\"}\n"
+                                    "{\"type\":\"session_info\",\"name\":\"New chat · %s\"}\n"
+                                    "{\"type\":\"message\",\"message\":{\"role\":\"assistant\","
+                                    "\"content\":[{\"type\":\"text\",\"text\":\"%s\"}]}}\n")
+                                   id (directory-file-name root) id text)))))
+            (write-session old "old-1" "Older last")
+            (write-session new "new-1" "Newer last")
+            (set-file-times old (encode-time 0 0 0 1 1 2020 t))
+            (set-file-times new (encode-time 0 0 0 1 1 2021 t))
+            (let ((candidates (magpi-backend-chat-candidates
+                               (make-magpi-pimacs-backend) root)))
+              (should (equal candidates
+                             (list (list :reference "pimacs:new-1"
+                                         :label "Newer last")
+                                   (list :reference "pimacs:old-1"
+                                         :label "Older last")))))))
+      (when (file-directory-p store) (delete-directory store t))
+      (when (file-directory-p root) (delete-directory root t)))))
+
+(ert-deftest magpi-pimacs-chat-candidates-live-wins-over-disk ()
+  (let* ((store (make-temp-file "magpi-sessions" t))
+         (root (file-name-as-directory (make-temp-file "magpi-root" t)))
+         (project (expand-file-name (magpi-pimacs--encode-cwd root) store))
+         (id "live-1")
+         (file (expand-file-name (format "2026-01-01T00-00-00-000Z_%s.jsonl" id)
+                                 project))
+         (process-environment
+          (cons (format "PI_CODING_AGENT_SESSION_DIR=%s" store)
+                process-environment))
+         (live (get-buffer-create " *magpi-live-cand*")))
+    (unwind-protect
+        (progn
+          (make-directory project t)
+          (with-temp-file file
+            (insert (format
+                     "{\"type\":\"session\",\"id\":\"%s\",\"cwd\":\"%s\"}\n"
+                     id (directory-file-name root)))
+            (insert "{\"type\":\"session_info\",\"name\":\"Disk title\"}\n"))
+          (with-current-buffer live
+            (setq-local default-directory root)
+            (setq-local pimacs--header-line-state
+                        (list :sessionName "Live title"
+                              :sessionStats (list :sessionId id)))
+            (let ((major-mode 'pimacs-chat-mode)
+                  (buffer-list-fn (symbol-function 'buffer-list)))
+              (cl-letf (((symbol-function 'derived-mode-p)
+                         (lambda (&rest _) (eq major-mode 'pimacs-chat-mode)))
+                        ((symbol-function 'buffer-list)
+                         (lambda () (cons live (funcall buffer-list-fn)))))
+                (let ((candidates (magpi-backend-chat-candidates
+                                   (make-magpi-pimacs-backend) root)))
+                  (should (equal (car candidates)
+                                 (list :reference "pimacs:live-1"
+                                       :label "Live title")))
+                  (should (= (length candidates) 1))))))
+      (when (buffer-live-p live) (kill-buffer live))
+      (when (file-directory-p store) (delete-directory store t))
+      (when (file-directory-p root) (delete-directory root t))))))
+(ert-deftest magpi-pimacs-backend-translates-approval-to-ask-without-invented-proof ()
+  (let ((ask (magpi-pimacs--normalize-ask
+              '(:id "q1" :question "Apply?" :affected-paths ("lib/auth.ex")))))
+    (should (equal (plist-get ask :id) "q1"))
+    (should (equal (plist-get ask :question) "Apply?"))
+    (should (equal (plist-get ask :affected-paths) '("lib/auth.ex")))
+    (should-not (plist-member ask :proposed-effect))
+    (should-not (plist-member ask :consequence)))
+  (should (equal (plist-get (car (magpi-pimacs--normalize-events
+                                  '(:type "approval_requested"
+                                    :id "q1" :question "Apply?")))
+                            :type)
+                 'ask-requested)))
+
+(ert-deftest magpi-pimacs-backend-cannot-answer-structured-asks ()
+  "Promise: Magpi does not invent a Pi approval RPC the adapter does not have."
+  (let ((backend (make-magpi-pimacs-backend)))
+    (should-not (magpi-backend-ask-supported-p backend))
+    (should-error (magpi-backend-respond-ask backend 'handle "q1" 'approved)
+                  :type 'user-error)))
 
 (provide 'magpi-pimacs-backend-tests)
 ;;; magpi-pimacs-backend-tests.el ends here

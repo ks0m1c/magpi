@@ -14,7 +14,8 @@
 (cl-defstruct magpi-pimacs-backend)
 
 (cl-defstruct magpi-pimacs-handle
-  id chat-buffer cleanup initial-title listener initial-sent key root)
+  id chat-buffer cleanup initial-title listener initial-sent key root
+  awaiting-entries history-timer)
 (defcustom magpi-pimacs-models-store-file
   (expand-file-name "~/.pi/agent/models-store.json")
   "Pi on-disk model catalog used when no live session can answer.
@@ -135,8 +136,181 @@ catalog only; it does not start an agent."
                          root)))))
        (buffer-list)))))
 
-(cl-defmethod magpi-backend-chat-candidates ((_backend magpi-pimacs-backend) root)
-  "Return active Pimacs chats at ROOT as durable session references."
+(defun magpi-pimacs--flag-value (option)
+  "Return the value following OPTION in `pimacs-flags', or nil."
+  (let ((flags (and (boundp 'pimacs-flags) pimacs-flags))
+        value)
+    (while flags
+      (if (equal (car flags) option)
+          (setq value (cadr flags)
+                flags nil)
+        (setq flags (cdr flags))))
+    value))
+
+(defun magpi-pimacs--session-store-root ()
+  "Return the Pi session store without starting an agent.
+
+Order: `--session-dir' from `pimacs-flags', then
+`PI_CODING_AGENT_SESSION_DIR', then Pi's default."
+  (or (magpi-pimacs--flag-value "--session-dir")
+      (let ((env (getenv "PI_CODING_AGENT_SESSION_DIR")))
+        (and (stringp env) (not (string-empty-p env)) env))
+      (expand-file-name "~/.pi/agent/sessions")))
+
+(defun magpi-pimacs--encode-cwd (root)
+  "Encode ROOT the way Pi names project session folders."
+  (let ((path (replace-regexp-in-string
+               "\\`/+" ""
+               (directory-file-name (expand-file-name root)))))
+    (concat "--"
+            (replace-regexp-in-string "/" "-" path t t)
+            "--")))
+
+(defun magpi-pimacs--project-session-dir (root)
+  (expand-file-name (magpi-pimacs--encode-cwd root)
+                    (magpi-pimacs--session-store-root)))
+
+(defun magpi-pimacs--generated-session-name-p (name)
+  "Return non-nil when NAME is a transport placeholder, not a real title."
+  (and (stringp name)
+       (or (member name '("New chat" "New task" "◯"))
+           (string-match-p "\\`\\(New chat\\|New task\\|◯\\) · " name))))
+
+(defun magpi-pimacs--session-label (name first-user &optional last-user)
+  "Choose a scannable label from NAME, then FIRST-USER, then LAST-USER.
+
+Generated transport names yield.  Last assistant never becomes the title."
+  (let* ((name (and (stringp name) (not (string-empty-p (string-trim name)))
+                    (string-trim name)))
+         (first (magpi--one-line first-user 120))
+         (last (magpi--one-line last-user 120)))
+    (or (and name (not (magpi-pimacs--generated-session-name-p name)) name)
+        first
+        last)))
+
+(defun magpi-pimacs--message-text (message)
+  "Return MESSAGE's text collapsed to one line, or nil when blank."
+  (when (listp message)
+    (magpi--one-line (magpi-pimacs--content-text
+                      (plist-get message :content))
+                     200)))
+
+(defconst magpi-pimacs--session-peek-bytes 65536
+  "Bytes peeked from a session JSONL head and tail.  Not a transcript load.")
+
+(defun magpi-pimacs--insert-session-window (filename start)
+  "Insert FILENAME from START to EOF.  Drop a partial first line when START>0."
+  (let ((size (file-attribute-size (file-attributes filename))))
+    (insert-file-contents filename nil start size)
+    (when (> start 0)
+      (goto-char (point-min))
+      (forward-line 1)
+      (delete-region (point-min) (point)))))
+
+(defun magpi-pimacs--scan-session-jsonl (on-json)
+  "Call ON-JSON with each JSON object in the current buffer."
+  (goto-char (point-min))
+  (while (not (eobp))
+    (let ((line (buffer-substring-no-properties
+                 (line-beginning-position) (line-end-position))))
+      (unless (string-empty-p line)
+        (condition-case nil
+            (funcall on-json
+                     (json-parse-string line :object-type 'plist
+                                        :array-type 'list))
+          (error nil))))
+    (forward-line 1)))
+
+(defun magpi-pimacs--absorb-session-json (acc json)
+  "Update ACC with identity, last user, and last assistant from one JSONL object."
+  (pcase (plist-get json :type)
+    ("session"
+     (plist-put acc :id (plist-get json :id))
+     (plist-put acc :cwd (plist-get json :cwd)))
+    ("session_info"
+     (unless (plist-get acc :name)
+       (plist-put acc :name (plist-get json :name))))
+    ("message"
+     (let* ((message (plist-get json :message))
+            (role (and (listp message) (plist-get message :role)))
+            (text (magpi-pimacs--message-text message)))
+       (when text
+         (cond
+          ((equal role "user")
+           (plist-put acc :last-user text)
+           (unless (plist-get acc :first-user)
+             (plist-put acc :first-user text)))
+          ((equal role "assistant")
+           (plist-put acc :last-activity text)))))))
+  acc)
+
+(defun magpi-pimacs--read-session-file (filename)
+  "Parse a primary Pi session JSONL into identity and a last-activity peek.
+
+Does not call Pi.  Tail peek is last assistant text.  Magpi never
+loads the transcript here.  Malformed files are skipped."
+  (when (and (stringp filename) (file-readable-p filename))
+    (condition-case nil
+        (let* ((size (file-attribute-size (file-attributes filename)))
+               (peek magpi-pimacs--session-peek-bytes)
+               (basename (file-name-base filename))
+               (acc (list :id nil :cwd nil :name nil
+                          :first-user nil :last-user nil :last-activity nil)))
+          (with-temp-buffer
+            (insert-file-contents filename nil 0 (min size peek))
+            (magpi-pimacs--scan-session-jsonl
+             (lambda (json) (magpi-pimacs--absorb-session-json acc json))))
+          (when (> size peek)
+            (with-temp-buffer
+              (magpi-pimacs--insert-session-window filename (- size peek))
+              (magpi-pimacs--scan-session-jsonl
+               (lambda (json) (magpi-pimacs--absorb-session-json acc json)))))
+          (let ((id (plist-get acc :id)))
+            (when (and (stringp id) (not (string-empty-p id))
+                       (or (equal id basename)
+                           (string-suffix-p (concat "_" id) basename)))
+              acc)))
+      (error nil))))
+
+(defun magpi-pimacs--disk-chat-candidates (root)
+  "Return historical session candidates for ROOT from the on-disk store.
+
+Recent last-activity (file mtime) first.  Labels peek the user task; last
+assistant is `:last'.  Pi is not started."
+  (let* ((root (file-truename (file-name-as-directory root)))
+         (dir (magpi-pimacs--project-session-dir root))
+         candidates)
+    (when (file-directory-p dir)
+      (dolist (file (directory-files dir t "\\.jsonl\\'"))
+        (when-let ((session (magpi-pimacs--read-session-file file)))
+          (let* ((cwd (plist-get session :cwd))
+                 (cwd (and (stringp cwd)
+                           (file-truename (file-name-as-directory cwd)))))
+            (when (or (null cwd) (equal cwd root))
+              (when-let ((label (magpi-pimacs--session-label
+                                 (plist-get session :name)
+                                 (plist-get session :first-user)
+                                 (or (plist-get session :last-user)
+                                     (plist-get session :last-activity)))))
+                (let ((last (plist-get session :last-activity)))
+                  (push (cons (or (file-attribute-modification-time
+                                   (file-attributes file))
+                                  '(0 0))
+                              (nconc
+                               (list :reference (concat "pimacs:" (plist-get session :id))
+                                     :label label)
+                               (when (and (stringp last)
+                                          (not (string-empty-p last))
+                                          (not (equal last label)))
+                                 (list :last last))))
+                        candidates))))))))
+    (mapcar #'cdr
+            (sort candidates
+                  (lambda (a b)
+                    (time-less-p (car b) (car a)))))))
+
+(defun magpi-pimacs--live-chat-candidates (root)
+  "Return live Pimacs chat buffers at ROOT as session references."
   (let ((root (file-truename (file-name-as-directory root))))
     (delq
      nil
@@ -146,14 +320,39 @@ catalog only; it does not start an agent."
           (when (and (derived-mode-p 'pimacs-chat-mode)
                      (ignore-errors
                        (equal (file-truename
-                               (file-name-as-directory default-directory)) root)))
-            (let* ((state pimacs--header-line-state)
-                   (session (plist-get state :sessionStats))
-                   (id (plist-get session :sessionId))
-                   (title (or (plist-get state :sessionName) (buffer-name buffer))))
-              (list :reference (concat "pimacs:" (or id (buffer-name buffer)))
-                    :label title)))))
+                               (file-name-as-directory default-directory))
+                              root)))
+            (let* ((state (and (boundp 'pimacs--header-line-state)
+                               pimacs--header-line-state))
+                   (session (and state (plist-get state :sessionStats)))
+                   (id (or (and session (plist-get session :sessionId))
+                           (buffer-name buffer)))
+                   (name (and state (plist-get state :sessionName)))
+                   (label (or (magpi-pimacs--session-label name nil)
+                              (buffer-name buffer))))
+              (list :reference (concat "pimacs:" id)
+                    :label label)))))
       (buffer-list)))))
+
+(defun magpi-pimacs--dedupe-chat-candidates (candidates)
+  "Deduplicate CANDIDATES by :reference; earlier entries win."
+  (let ((seen (make-hash-table :test #'equal))
+        out)
+    (dolist (candidate candidates)
+      (let ((ref (plist-get candidate :reference)))
+        (unless (or (null ref) (gethash ref seen))
+          (puthash ref t seen)
+          (push candidate out))))
+    (nreverse out)))
+
+(cl-defmethod magpi-backend-chat-candidates ((_backend magpi-pimacs-backend) root)
+  "Return live and historical chats for ROOT as (:reference :label).
+
+Live wins on the same reference.  Disk sessions are read cold; Pi is not started."
+  (magpi-pimacs--dedupe-chat-candidates
+   (append (magpi-pimacs--live-chat-candidates root)
+           (magpi-pimacs--disk-chat-candidates root))))
+
 (defun magpi-pimacs--catalog-chat (handle root)
   "Return the chat buffer to query for a model catalog."
   (or (and handle (magpi-pimacs-handle-p handle)
@@ -212,7 +411,7 @@ A disk read stores it immediately.  Returns the cached models, if any."
                       (magpi-launch-spec-role spec)))))))
 
 (defun magpi-pimacs--initial-prompt (action)
-  "Compile ATTEMPT's task prompt and frozen source context.
+  "Compile ACTION's task prompt and frozen source context.
 
 Authority, model, and intention identity are not prompt text."
   (when-let ((prompt (magpi-action-prompt action)))
@@ -329,6 +528,44 @@ Authority, model, and intention identity are not prompt text."
                             (plist-get data :model))))
            (funcall listener (list :type 'model-observed :model model))))))))
 
+(defun magpi-pimacs--number (value)
+  "Return VALUE when it is a number.  json-null and strings stay silent."
+  (and (numberp value) value))
+
+(defun magpi-pimacs--usage-pair (key value)
+  (when-let ((n (magpi-pimacs--number value)))
+    (list key n)))
+
+(defun magpi-pimacs--normalize-usage (data)
+  "Return Magpi usage plist from Pimacs session-stats DATA, or nil."
+  (when (listp data)
+    (let* ((tokens (plist-get data :tokens))
+           (context (plist-get data :contextUsage))
+           (usage
+            (append
+             (and (listp tokens)
+                  (append
+                   (magpi-pimacs--usage-pair :input (plist-get tokens :input))
+                   (magpi-pimacs--usage-pair :output (plist-get tokens :output))
+                   (magpi-pimacs--usage-pair :total (plist-get tokens :total))))
+             (magpi-pimacs--usage-pair :cost (plist-get data :cost))
+             (and (listp context)
+                  (append
+                   (magpi-pimacs--usage-pair :context (plist-get context :tokens))
+                   (magpi-pimacs--usage-pair :window
+                                            (plist-get context :contextWindow)))))))
+      (when usage usage))))
+
+(defun magpi-pimacs--request-usage (listener)
+  "Reconcile Pimacs session stats into a usage observation."
+  (pimacs--send-command
+   "get_session_stats" '()
+   (lambda (response)
+     (when (pimacs--response-success-p response)
+       (when-let ((usage (magpi-pimacs--normalize-usage
+                          (plist-get response :data))))
+         (funcall listener (list :type 'usage-observed :usage usage)))))))
+
 (defun magpi-pimacs--without-parent-session (env)
   "Return ENV without a parent Pi session identity.
 A Magpi-spawned agent must not inherit the operator's Pi session."
@@ -379,6 +616,108 @@ A Magpi-spawned agent must not inherit the operator's Pi session."
           (pimacs-send-prompt prompt nil)))))
   handle)
 
+(defun magpi-pimacs--history-rendered-p (&optional chat)
+  "Return non-nil when CHAT already shows session messages.
+
+Session name chrome (`info') is not history.  Missing Pimacs section
+machinery means the transcript is not shown."
+  (let ((chat (or chat (current-buffer))))
+    (when (buffer-live-p chat)
+      (with-current-buffer chat
+        (when (and (fboundp 'pimacs-section-children)
+                   (fboundp 'pimacs-section-type)
+                   (boundp 'pimacs-section--root-section)
+                   pimacs-section--root-section)
+          (seq-some
+           (lambda (section)
+             (memq (pimacs-section-type section)
+                   '(user assistant tool compact custom model thinking-level)))
+           (pimacs-section-children pimacs-section--root-section)))))))
+
+(defun magpi-pimacs--chat-history-pending (chat)
+  "Return pending history count, t if unknown, or nil."
+  (when (buffer-live-p chat)
+    (with-current-buffer chat
+      (cond
+       ((and (boundp 'pimacs--history-render-pending)
+             pimacs--history-render-pending)
+        (if (fboundp 'pimacs--history-pending-entry-count)
+            (pimacs--history-pending-entry-count)
+          (apply #'+ (mapcar #'length pimacs--history-render-pending))))
+       ((and (boundp 'pimacs--history-loading-section)
+             pimacs--history-loading-section)
+        t)))))
+
+(defun magpi-pimacs--history-busy-p (handle)
+  (or (magpi-pimacs-handle-awaiting-entries handle)
+      (magpi-pimacs--chat-history-pending
+       (magpi-pimacs-handle-chat-buffer handle))))
+
+(defun magpi-pimacs--paint-history (handle)
+  (when-let ((listener (magpi-pimacs-handle-listener handle)))
+    (funcall listener '(:type history-pending))))
+
+(defun magpi-pimacs--history-watch-stop (handle)
+  (when-let ((timer (and (magpi-pimacs-handle-p handle)
+                         (magpi-pimacs-handle-history-timer handle))))
+    (when (timerp timer) (cancel-timer timer)))
+  (when (magpi-pimacs-handle-p handle)
+    (setf (magpi-pimacs-handle-history-timer handle) nil)))
+
+(defun magpi-pimacs--history-watch-tick (handle)
+  (if (and (magpi-pimacs-handle-p handle)
+           (buffer-live-p (magpi-pimacs-handle-chat-buffer handle))
+           (magpi-pimacs--history-busy-p handle))
+      (magpi-pimacs--paint-history handle)
+    (magpi-pimacs--history-watch-stop handle)
+    (magpi-pimacs--paint-history handle)))
+
+(defun magpi-pimacs--history-watch-start (handle)
+  (magpi-pimacs--history-watch-stop handle)
+  (magpi-pimacs--paint-history handle)
+  (when (magpi-pimacs--history-busy-p handle)
+    (setf (magpi-pimacs-handle-history-timer handle)
+          (run-with-idle-timer 0.35 t #'magpi-pimacs--history-watch-tick handle))))
+
+(defun magpi-pimacs--history-arrived (handle)
+  (when (magpi-pimacs-handle-p handle)
+    (setf (magpi-pimacs-handle-awaiting-entries handle) nil)
+    (magpi-pimacs--history-watch-start handle)))
+
+(defun magpi-pimacs--history-pending-label (handle)
+  "Return a glance loading mark while HANDLE's chat is filling, or nil."
+  (cond
+   ((not (magpi-pimacs-handle-p handle)) nil)
+   ((magpi-pimacs-handle-awaiting-entries handle) "loading")
+   (t
+    (let ((pending (magpi-pimacs--chat-history-pending
+                    (magpi-pimacs-handle-chat-buffer handle))))
+      (cond
+       ((and (numberp pending) (> pending 0))
+        (format "loading %d" pending))
+       (pending "loading"))))))
+
+(cl-defmethod magpi-backend-history-pending ((_backend magpi-pimacs-backend) handle)
+  (magpi-pimacs--history-pending-label handle))
+
+(defun magpi-pimacs--hydrate-history (chat handle)
+  "Ask Pimacs to snapshot session entries into CHAT when the UI is empty.
+
+`get_entries' is not a model turn: no tokens.  Pimacs paints last activity
+first, then lazily fills earlier history.  Magpi never parses JSONL.
+Glance may show loading until the porcelain is still."
+  (when (and (magpi-pimacs-handle-p handle)
+             (buffer-live-p chat)
+             (fboundp 'pimacs-refresh-session)
+             (not (magpi-pimacs--history-rendered-p chat)))
+    (with-current-buffer chat
+      (when (ignore-errors (pimacs--current-agent))
+        (setf (magpi-pimacs-handle-awaiting-entries handle) t)
+        (magpi-pimacs--history-watch-start handle)
+        (condition-case nil
+            (pimacs-refresh-session
+             (lambda () (magpi-pimacs--history-arrived handle)))
+          (error (magpi-pimacs--history-arrived handle)))))))
 (cl-defmethod magpi-backend-visit ((_backend magpi-pimacs-backend) handle)
   (let ((chat (magpi-pimacs-handle-chat-buffer handle)))
     (unless (buffer-live-p chat)
@@ -397,6 +736,7 @@ A Magpi-spawned agent must not inherit the operator's Pi session."
         (when-let ((listener (magpi-pimacs-handle-listener handle)))
           (with-current-buffer chat
             (magpi-pimacs--listen handle listener)))))
+    (magpi-pimacs--hydrate-history chat handle)
     (pop-to-buffer chat)))
 
 (cl-defmethod magpi-backend-visit-root ((_backend magpi-pimacs-backend) root)
@@ -417,6 +757,7 @@ A Magpi-spawned agent must not inherit the operator's Pi session."
       (pimacs-send-prompt message mode))))
 
 (cl-defmethod magpi-backend-terminate ((_backend magpi-pimacs-backend) handle)
+  (magpi-pimacs--history-watch-stop handle)
   (let ((chat (magpi-pimacs-handle-chat-buffer handle)))
     (when (buffer-live-p chat)
       (with-current-buffer chat
@@ -427,7 +768,8 @@ A Magpi-spawned agent must not inherit the operator's Pi session."
         (listener (or listener (magpi-pimacs-handle-listener handle))))
     (when (and listener (buffer-live-p chat))
       (with-current-buffer chat
-        (magpi-pimacs--request-state handle listener)))))
+        (magpi-pimacs--request-state handle listener)
+        (magpi-pimacs--request-usage listener)))))
 
 (cl-defmethod magpi-backend-session-ref ((_backend magpi-pimacs-backend) handle)
   (and (magpi-pimacs-handle-p handle)
