@@ -27,37 +27,57 @@ LIFE_LFLAGS = $(SEAM_LFLAGS) \
 	-L $(MAGPI_STRAIGHT_BUILD)/pcre2el \
 	-L $(MAGPI_STRAIGHT_BUILD)/pimacs
 
-.PHONY: test test-unit test-seams test-emacs test-life test-life-pi
+.PHONY: test test-unit test-seams test-emacs test-life test-life-pi compile xref instrument need-magit need-life
 test: test-unit test-seams
 
 test-emacs: test
+
+need-magit:
+	@test -n "$(MAGPI_STRAIGHT_BUILD)" || { \
+	  echo "error: no straight build root; set MAGPI_STRAIGHT_BUILD"; exit 1; }
+	@test -d "$(MAGPI_STRAIGHT_BUILD)/magit" || { \
+	  echo "error: $(MAGPI_STRAIGHT_BUILD) lacks magit"; exit 1; }
+
+need-life: need-magit
+	@test -d "$(MAGPI_STRAIGHT_BUILD)/pimacs" || { \
+	  echo "error: $(MAGPI_STRAIGHT_BUILD) lacks pimacs"; exit 1; }
 
 test-unit:
 	$(EMACS_BATCH) -L emacs -L emacs/test $(foreach file,$(UNIT_TEST_FILES),-l $(file)) \
 		-f ert-run-tests-batch-and-exit
 
-test-seams:
-	@test -n "$(MAGPI_STRAIGHT_BUILD)" || { \
-	  echo "error: no straight build root; set MAGPI_STRAIGHT_BUILD"; exit 1; }
-	@test -d "$(MAGPI_STRAIGHT_BUILD)/magit" || { \
-	  echo "error: $(MAGPI_STRAIGHT_BUILD) lacks magit"; exit 1; }
+test-seams: need-magit
 	MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
 		$(SEAM_LFLAGS) -L emacs -L emacs/test \
 		-l emacs/test/magpi-seam-tests.el \
 		-f ert-run-tests-batch-and-exit
 
-test-life:
-	@test -n "$(MAGPI_STRAIGHT_BUILD)" || { \
-	  echo "error: no straight build root; set MAGPI_STRAIGHT_BUILD"; exit 1; }
+test-life: need-life
 	MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
 		$(LIFE_LFLAGS) -L emacs -L emacs/test \
 		-l emacs/test/magpi-life-play.el \
 		--eval "(magpi-life-play-run 'git)"
 
-test-life-pi:
-	@test -n "$(MAGPI_STRAIGHT_BUILD)" || { \
-	  echo "error: no straight build root; set MAGPI_STRAIGHT_BUILD"; exit 1; }
+test-life-pi: need-life
 	PI_OFFLINE=1 MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
 		$(LIFE_LFLAGS) -L emacs -L emacs/test \
 		-l emacs/test/magpi-life-play.el \
 		--eval "(magpi-life-play-run 'pi)"
+
+compile: need-life
+	MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
+		$(LIFE_LFLAGS) -L emacs -L emacs/test \
+		-l emacs/test/magpi-instrument.el \
+		--eval "(kill-emacs (magpi-instrument-exit-code (magpi-instrument-compile)))"
+
+xref: need-life
+	MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
+		$(LIFE_LFLAGS) -L emacs -L emacs/test \
+		-l emacs/test/magpi-instrument.el \
+		--eval "(progn (magpi-instrument-load) (magpi-instrument-xref))"
+
+instrument: need-life
+	MAGPI_STRAIGHT_BUILD=$(MAGPI_STRAIGHT_BUILD) $(EMACS_BATCH) \
+		$(LIFE_LFLAGS) -L emacs -L emacs/test \
+		-l emacs/test/magpi-instrument.el \
+		-f magpi-instrument
