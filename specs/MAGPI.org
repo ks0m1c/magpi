@@ -1,0 +1,839 @@
+#+title: Magpi
+#+author: ks0m1c
+#+filetags: :magpi:pi:emacs:design:
+#+startup: overview indent hidestars
+#+subtitle: Intention-first Emacs porcelain for deliberate Pi work
+
+Spec reasoning: [[file:_meta/KUMITE.org][Kumite shortcut]] (canon in dojo =specs/_meta/=).
+
+* Proposition
+
+Magpi is a small Emacs porcelain for deliberate Pi work in one Git repository.
+
+#+begin_quote
+State the why. Bind only the context it needs. Spawn an action. See the work. React.
+#+end_quote
+
+#+begin_example
+intention → action → chat / edits → glance → traverse / inspect → react → return
+#+end_example
+
+It should make that loop quieter and safer than coordinating chats, worktrees,
+and Magit by hand. It is not an agent OS, workflow engine, second chat client,
+fleet dashboard, or shadow Git.
+
+* Names
+
+| Name | Being | Not |
+|------+-------+-----|
+| Intention | the why | a prompt, a branch, a chat |
+| Action | one doing | a ticket, a retry of the same |
+| Changes | the flux (values on the intention) | a struct, a workspace |
+| Role | =writer= or =reader= | authority, access |
+| Bind | give context to the surface at point | a hidden prompt |
+| React | intervene in the world | chat prose, automatic approval |
+| Observation | reported fact | permission |
+| Ask | Pi question inside an observation | a Magpi aggregate |
+| Adapter | Pimacs translation | a runtime, a plugin platform |
+| Traversal | session turns arranged for movement at point | a transcript store, activity feed, workflow graph |
+| Return address | enough semantic identity to resume a departure | a bookmark, raw buffer offset, saved desktop |
+
+Glance is colour and mark. Depth is Magit. Chat is Pimacs. Git is Git.
+
+A new id is a new being. Paint, auspice, Head, and Return are functions over
+ids, not further beings.
+
+* Essential model
+
+Only distinctions which change ownership or user action deserve representation.
+
+#+begin_example
+Intention(id, objective, bindings[], change?, state, writer_lease?, audit)
+Change(source_root, worktree_path, branch, base_ref)   ; values, not a record
+Action kernel  (id, intention_id?, chat_ref, created_at, spawn_oid?, title?)
+Action theatre (launch?, observation?, prompt?, started_at?)   ; this Emacs
+Launch(root, requested_model?, thinking, role, context)
+Observation(title?, activity-state, connection?, running_model?, files?, last?, problem?, asks[], usage?)
+Ask(id, question, state, paths?, parent_id?)           ; inside observation
+Entry(id, parent_id?, role, at?, summary, body?, complete?)  ; borrowed, Pi/Pimacs
+TraversalNode(id, parent_id?, kind, role?, at?, summary, body?, owner) ; query projection
+RepositoryKey(git_common_dir)                                  ; canonical ownership key
+Checkout(display_root)                                         ; where this Emacs stands
+ReturnAddress(repository_key, display_root, owner, target, ancestry,
+              marker?, window_start?, generation?)             ; this Emacs
+#+end_example
+
+** Identities
+
+Magpi mints three beings: Intention, Action, Ask. Everything else is borrowed
+or theatre.
+
+| Identity | Id | Owner | Magpi may |
+|----------+----+-------+-----------|
+| Intention | =intention-id= | Magpi file | why, binds, one change, lease, audit |
+| Action | =action-id= | Magpi file | one doing; requested Pi session id |
+| Ask | =(action-id ask-id)= | Observation | one judgment |
+| Entry | Pi/Pimacs entry id | Pi | project parentage and summary |
+| Path | repo-relative path | filesystem | mention or open |
+| Git fact | =(change-owner path)= | Git | query dirt, range, diff |
+| Binding | =(intention-id kind reference)= | Intention file | hold context, never silently prompt |
+| Repository | =git-common-dir= | Git | one store, one return ring |
+| Checkout | worktree or source path | Git | =default-directory= |
+| Section | =(type . value)= | Magit | point, fold, ancestry |
+
+=change-owner= is the Intention when the Action belongs to one, otherwise the
+standalone Action. Observation, Head, auspice, and paint mint no ids. Titles,
+activity, paths, and rendered text never become identity.
+
+Relations:
+
+#+begin_example
+Intention 1—0..1 Change
+Intention 1—*     Action
+Action    1—1     Session          ; Action id is the requested session id
+Action    1—*     Entry            ; borrowed, queryable while attached
+Entry     0—1     Entry            ; parent-id only; no invented edges
+Ask       0—1     Entry            ; parent when Pi says so
+Path      splits  observed | git
+Repository 1—*    Checkout
+#+end_example
+
+Missing parent stays missing. A tool-start path is observed, not a Git fact.
+The same path may exist as both; they never merge.
+
+An intention is one authored objective. Bindings are context, never silently a
+prompt. It gains one managed Git change only when its first action starts. An
+action is one execution and never inherits the objective as its prompt. A new
+doing is another id. Process death on the same id is retry, not another doing.
+A standalone action may run in the current checkout without an intention.
+
+Traversal is a session-local projection over records owned elsewhere. Pi/Pimacs owns
+turns; observation supplies live asks and lifecycle; intention files supply why, binds,
+and audit; Git supplies consequences. A ReturnAddress is navigation theatre. Neither is
+added to the Action or Intention record.
+
+Do not extract a Workspace. While one intention has one worktree, Change stays
+fields on the intention.
+
+* Surfaces
+
+Coordinates, this Emacs, and the world are three surfaces. Mixing them writes
+theatre to disk and paints =lift= on a cold Action.
+
+#+begin_example
+state   files + RAM tables           coordinates
+fill    disk → RAM                   not a world effect
+effect  commands that change world   Git, Pi, lease, birth
+query   facts with no permission     glance, live-p, git-facts
+#+end_example
+
+** State
+
+Durable, repository-private (=.git/magpi/{intentions,actions}/<id>.el=):
+
+| Record | Fields |
+|--------+--------|
+| Action | id, intention-id?, chat-ref (=id), created-at; standalone also title, spawn-oid |
+| Intention | why, bindings, branch, base-ref, base-oid, worktree path, state, writer-lease, audit, created-at |
+
+Never on disk: observation, launch, prompt, handle, last HEAD, action-ids,
+auspice, Head, ReturnAddresses.
+Source-root is the store folder, not an Intention field. Extra keys round-trip.
+
+Intention =state=: =active=, =merged=, =discarded=. Richer durable states only
+with a user operation that needs them.
+
+Action Observation =activity-state= (this Emacs, reducer): =starting=,
+=running=, =idle=, =unknown=. Connection: =connected= or =disconnected=.
+Ask =state=: =pending=, =approved=, =rejected=, =dismissed=.
+
+Working, this Emacs:
+
+| Table | Value |
+|-------+-------|
+| =magpi--intentions= | latest intention |
+| =magpi--actions= | kernel ∪ optional theatre |
+| =magpi--handles= | opaque adapter handle; never part of the record |
+| traversal buffer cache | normalized nodes for an attached action; disposable |
+| return ring | bounded ReturnAddresses; markers and windows are accelerators |
+| head-follow | boolean: point is on Head, or not |
+
+Glance lists disk and joins this Emacs's theatre by id. Paint does not
+=puthash=. A live observation, launch, or handle wins over a cold kernel;
+otherwise the file is shown cold. Fill (birth, reduce, RET load) still writes
+the registry. Fill does not call =magpi-observation-initial= on a file.
+
+Miss in a table is not birth. Intention effects load the file when the store
+exists. Action miss loads that id, then errors. Birth is only an effect with
+a new id.
+
+** Effect
+
+Each world change has one owner. Navigation is not a world effect. Recording
+and landing a ReturnAddress are theatre consequences of crossing and of
+whether those identities still exist.
+
+| Effect | Does | Never |
+|--------+------+-------|
+| birth | persist kernel, then spawn; =send-initial= once | reuse an id |
+| ensure-process | live → visit; dead/absent → attach, no =send-initial= | new id, rebake Action |
+| reduce+replace | =magpi-action-reduce=, then =puthash= | write the Action file |
+| bind / lease / state | copy intention, append audit, save | |
+| Git change | =ensure-worktree=, merge, discard | Magit glance |
+| React | answer ask; release writer; merge/discard | RET, fold, =g=, =t=, =C-c m b/f= |
+
+Launch rebuilt on resume is RAM defaults, not last Transient. Pi session
+return is adapter spawn with =--session-id= = Action id; Magpi does not read
+jsonl. Cross-domain birth is not one transaction: persist first, then Pimacs.
+
+** Query
+
+No permission, no birth, no lease change. Glance is a projection of query.
+=g= is query (snapshot pull). =RET= =s= =a= =i= =@= are effects.
+=t= and return-ring walk are queries plus theatre.
+
+| Ask | Source | When missing |
+|-----+--------+--------------|
+| =action-load= / =list= | file | nil or =unreadable= |
+| =intention-load= / =list= | file | nil or =unreadable= |
+| membership | RAM Actions by =intention-id= | empty |
+| git-facts / work-range | Git now | missing, unknown, or error |
+| standalone range | =spawn-oid..HEAD= if ancestor | error |
+| =live-p= / process-state | handle + adapter | =absent= |
+| session entries | attached adapter =entries= | unavailable — never parse JSONL here |
+| auspice | Observation + asks + Intention + git-facts | cold |
+| traversal head | entries + auspice | Action heading when none |
+| return resolution | ReturnAddress against current Nodes | named ancestor, or no move |
+| observation | RAM theatre | cold — not =lift= |
+| reconcile | live handle only | skip |
+
+Nil observation is cold. =magpi-observation-initial= is first birth only.
+Titles, activity, paths, and rendered text never become identity.
+Traversal queries an attached session by Action id. The adapter may use its client's
+session API and private parser; Magpi core never opens Pi JSONL. Query failure leaves a
+cold or partial traversal and does not create a journal, infer turns, or mutate records.
+
+* Invariants
+
+1. *One intention, one change once work starts.*
+2. *Objective is not a prompt.* Only the action prompt and explicitly bound
+   context enter chat.
+3. *Action identity precedes spawn.* A new doing is another id. Process retry
+   on a known id is visit or spawn without =send-initial=.
+4. *Exclusive writer is opt-in.* =W= takes the lease before spawn. Ordinary
+   =w= does not. Readers never take the lease. A held lease refuses further
+   writers.
+5. *Uncertainty stays visible.* Disconnect cannot release a lease or claim
+   completion. Writer release is operator recovery, not a fence.
+6. *Git tells Git facts.* Missing is missing, not clean or zero.
+7. *Observation is not permission.* Titles, activity, paths, and rendered text
+   never become identity or intent.
+8. *Read before write.* Navigation and glance never mutate world or files.
+   Glance joins disk with theatre and does not write the registry. React is
+   explicit and confirmed.
+9. *Action exit does not decide the why.* Only the user merges or discards.
+10. *One owner for now.* One controlling Emacs. The repository file is not a
+    distributed lock.
+11. *Traversal is a projection.* Pi/Pimacs owns turns, Git owns changes, files own
+    contents. Magpi arranges references and live facts; it does not copy a transcript.
+12. *Return is semantic before geometric.* Repository, owner, and section ancestry
+    outrank marker, window, and rendered title. Point integer is not stored.
+13. *Refresh does not steal point.* The selected semantic node and ordinary Magit
+    visibility survive repaint. New events advance only a user already following head.
+14. *Missing lineage stays missing.* Do not pair without =parent-id=, invent
+    timestamps, call a tool-start path a successful edit, or turn an unanswered
+    ask into an answer.
+15. *Ask is not Head.* Head is an assistant Entry (or the Action heading).
+    Pending Ask is attention. Lease is =w=, never =?=.
+
+* Ownership
+
+| Concern | Owner |
+|---------+-------|
+| Why, bindings, change, lease, Git mutations | Magpi Lisp |
+| Point, buffers, sections, display policy, return ring | Emacs |
+| Traversal projection, Head, auspice, typed return resolution | Magpi Lisp |
+| Diff, stage, commit, history | Git and Magit |
+| Chat, Pi protocol, session entries | Pimacs and Pi |
+| Durable process supervision | Deferred |
+
+Priors: Magit is the Git porcelain Magpi does not replace. Transient is
+Magit's extracted menu library. Pimacs is the chat client. Forge sits on
+Magit the same way Magpi sits on Magit and Pimacs — a seam, not a stack.
+
+One adapter, =magpi-pimacs-backend.el=, holds Pimacs-private knowledge. Magpi sees:
+
+#+begin_example
+spawn(action, listener)
+send_initial(handle, action)
+visit(handle)
+send(handle, message, mode)
+terminate(handle)
+reconcile(handle, listener)
+entries(handle, generation, callback)      ; one normalized snapshot result
+respond_ask(handle, ask_id, response)       ; when the adapter can
+#+end_example
+
+=entries= calls CALLBACK exactly once with one of:
+
+#+begin_example
+(:status ok :generation G :action-id A :session-id S :complete BOOL
+ :entries (ENTRY...))
+(:status error :generation G :action-id A :kind KIND :message TEXT)
+
+ENTRY = (:id ID :parent-id ID? :role user|assistant :at TIME?
+         :summary TEXT :body VALUE? :complete BOOL)
+#+end_example
+
+Empty success is =:status ok= with =:entries nil=, distinct from error.
+=:complete= on the snapshot means it is not truncated; Magpi still computes
+Head. =:role= is =user= or =assistant=; unknown roles may be shown folded and
+are never Head. The caller increments generation before each request and
+applies a callback only when generation and Action id still match the current
+request; stale callbacks are ignored. Cancellation is optional because stale
+results have no authority. Adapter-private records never escape this
+normalized schema. Magpi ignores any adapter-suggested head id.
+
+A seam around present dependency, not a backend platform.
+
+* Composition
+
+Each Emacs file has one job.
+
+| File | Job |
+|------+-----|
+| =magpi.el= | registry, effects, intention commands, =C-c m= |
+| =magpi-intention.el= | Git being: change, lease, audit, mutations |
+| =magpi-action.el= | immutable Action / Observation; pure reducer |
+| =magpi-launch.el= | frozen launch specification |
+| =magpi-backend.el= | adapter verbs |
+| =magpi-pimacs-backend.el= | the Pimacs adapter; catalog fill |
+| =magpi-store.el= | Git location (=git-common-dir=) and plist records |
+| =magpi-status.el= | glance |
+| =magpi-traversal.el= | session outline, Head, return addresses |
+| =magpi-transient.el= | launch choices |
+
+
+Magit doors: intention work is =base-oid..HEAD=; standalone work is
+=spawn-oid..HEAD= when that oid is still an ancestor of HEAD. Two call sites of
+a frozen-oid range, not a Workspace. =ensure-worktree= stays the nested cond it
+must be; the audit log is the state machine. Store names the Git folder;
+intention mutates Git. Do not move merge into store.
+
+Dispatch freezes Launch: root, requested model, thinking, role, bind.
+Catalog fill is a registered launch helper, not an adapter verb. Event
+listeners capture an attempt ID. =magpi-action-reduce= returns the same
+attempt when a fact is restated, otherwise a new value which =magpi.el=
+replaces. Event paints never reconcile; =g= is the snapshot pull.
+
+Default bind is None unless an active region is source-file evidence.
+Grouped chats take the intention objective as title; standalone chats take a
+generated task title. The task is the first user message.
+
+Status headings glance auspice, ask mark, branch or =not started=, dirty,
+ahead/behind, writer, and action count. Attachments and tasks nest below.
+Missing Git facts render as missing.
+
+#+begin_example
+magpi/
+├── emacs/       installable Lisp, model, tests
+├── specs/       MAGPI.org and proposals
+├── Makefile     reproducible checks
+├── magpi.svg    colophon
+└── README.md
+#+end_example
+
+* Interaction
+
+Status is an intention dashboard, not a process inventory. The heading is why
+plus a Git glance. Nested rows are actions and their observations. A pending
+reaction is a mark, not a lecture. Perch holds live work and intentions,
+latest first. Cold holds standalone chats without theatre. Quiet meta may
+show age. Nested actions stay with their intention.
+
+| Key | Meaning |
+|-----+---------|
+| =i= | Create an intention |
+| =@= | Bind context to the surface at point |
+| =C-c m i= / =C-c m @= | Create or bind outside status |
+| =s= | Spawn an action; keep the intention at point |
+| =RET= | Intention → Magit; action → chat; ask → React |
+| =TAB= | Fold |
+| =j= | Toggle Perch / Cold |
+| =t= | Open traversal for the surface at point; in traversal, return to head |
+| =C-c m t= | Open traversal from any source surface |
+| =C-c m b= / =C-c m f= | Semantic return / forward in Magpi's project-local ring |
+| =n= / =p= | Next / previous last-seen chat heading; wraps |
+| =g= | Reconcile observations and repaint |
+| =m= / =d= / =l= / =c= | Magit status, diff, log, commit of the changes |
+| =a= | React |
+| =k= | Discard at point: chat, action, intention, or worktree (deep, like Magit hunk) |
+| =C-c m k= | Same discard from chat or Magit |
+| =q= | Quit |
+
+=s= is spawn in Magpi status and stage in Magit. Distinct modes, not a collision.
+
+Launch defaults to =w= (writer). Press =w= to toggle =r= (reader). Press =W=
+for an exclusive writer lease; without it several writers may share an intention.
+
+- On an intention, =s= starts an action in its worktree.
+- Elsewhere, =s= starts a standalone action in the current checkout.
+- Creating an intention only persists why and bindings; the first action
+  creates the worktree.
+- Point may default; it never silently changes ownership.
+
+Bind is contextual. Intention holds durable why-references. Action may hold this
+doing's observed paths. Launch may freeze point or region into the spawn. Porcelain
+buffers are not source.
+
+React is the intervention surface:
+
+- Pi-ask → approve / reject
+- Intention with writer → release (honest recovery)
+- Intention quiescent → merge / discard
+- Action disconnected → show uncertainty; do not fake completion
+
+=k= is Magit's discard hunk, at Magpi depth. Innermost surface wins: chat
+terminates the agent; action also releases that doing's writer; intention
+terminates nested theatre then force-removes the worktree; Magit hunk/file/list
+stay Magit. A pending Pi-ask is React, not discard. Confirmation stays explicit.
+
+** Auspice
+
+Auspice is a glance projection. The reducer does not store it. Pigment follows
+auspice and its transitions; presentation of glyphs may iterate.
+
+Action auspice, from Observation, first match:
+
+| Observation | Auspice |
+|-------------+---------|
+| nil | cold |
+| =disconnected=, =unknown=, or =problem= | blood |
+| =activity-state= =starting= | lift |
+| =activity-state= =running= | aloft |
+| =activity-state= =idle= | rest |
+| otherwise | cold |
+
+A pending Ask overlays attention (=?=) without changing auspice. Writer lease
+is =w= in meta, never =?=.
+
+Subject-level (not Action auspice):
+
+| Condition | Glance |
+|-----------+--------|
+| no Intention and no Action | empty |
+| Intention =active=, no lift/aloft Action, Git fact present | quiescent |
+
+Empty sky is the wait. Cold is not lift.
+
+Transitions that may change pigment (and, later, motion):
+
+| Event | Auspice |
+|-------+---------|
+| kernel on disk, no theatre | cold |
+| spawn / =send-initial= | lift |
+| =activity-started= | aloft |
+| =activity-ended= with =:idle= | rest |
+| =ask-requested= / =ask-resolved= | auspice unchanged; =?= appears or leaves |
+| =disconnected= / =problem-observed= | blood |
+| merge / discard | Intention terminal; row gone |
+
+Only lift → aloft → rest and any → blood are lifecycle edges. Bind, file-observed,
+title, model, fold, refresh, point, and evidence arrival are not edges.
+
+** Paint
+
+Paint is an Emacs face contract, not a fixed palette. Magpi defines semantic faces by
+inheritance and permits themes to decide exact hue. Colour restates auspice and mark;
+a theme may not invent an hour.
+
+The light budget has four values:
+
+| Value | Holds |
+|-------+-------|
+| light | authored why; the section at point; sole fault or pending judgment |
+| half-light | expanded response and evidence relevant to point |
+| penumbra | folded history, branch structure, timestamps, model, state meta |
+| deep shadow | unused buffer space; absence without placeholder noise |
+
+Warmth is reserved for immediate action and judgment; coolness for retained context and
+evidence; error inheritance for fault. Ordinary rows receive no custom background.
+Selection uses Magit/Emacs section highlight or =hl-line= semantics. Point gets one light
+center; illuminating every row destroys hierarchy.
+
+The buffer remains still under point movement, fold, refresh, and evidence arrival. Only a
+lifecycle edge may move a motion seat. Pimacs history fill is porcelain, not an hour:
+=get_entries= and lazy render may show a quiet 5-column fetching spark in meta
+(=·•···= traveling). Cold stays cold; reduced-motion keeps the still word =load.=.
+The reducer does not mint Observation. GUI, light theme, 16-colour terminal,
+monochrome, and reduced-motion must retain the same order.
+
+Heading columns, when rendered:
+
+#+begin_example
+[fold] [attention] title    [motion] [retention] quiet meta
+#+end_example
+
+Fold belongs to Magit. Attention is =?=, =!=, or silence. Motion is the still
+5-column cast (hour names are the projection and the fallback). Retention
+presents bind/evidence. Meta recedes. Glyphs, flourish, and fallbacks may
+iterate; they must not mint ids or add auspice.
+
+** Traversal
+:PROPERTIES:
+:ID: magpi-traversal
+:END:
+
+Traversal makes human intent and agent memory easy to walk without making a second chat
+client. It is a native Magit-section outline assembled on demand from owned facts.
+
+*** Subject and source
+
+The subject is an Intention when the selected Action belongs to one; otherwise it is the
+standalone Action. An Intention heading holds its why and nests Actions. Each Action owns
+one Pi session because Action id is the requested Pi session id. Expanding or focusing an
+Action may query that session's entries through the adapter.
+
+Source precedence is factual, not merge-by-convenience:
+
+1. Adapter session entries supply user and assistant turns, ids, parentage, and times.
+2. Live Observation overlays pending asks, connection, activity, and last-response.
+3. Action and Intention records supply identity, why, bindings, audit, and cold recovery.
+4. Git/worktree queries supply present consequences and ranges.
+
+No source impersonates another. A tool-start path is observed, not a successful edit.
+Git change does not identify which message caused it. A missing adapter entry remains a
+gap. Magpi core does not open, tail, or parse Pi JSONL; the Pimacs adapter may call its
+session API and use Pimacs-private parsing behind =entries(handle, generation, callback)=.
+
+A query cache lives only while this Emacs does. Killing it loses no Magpi-owned durable
+state. =t= never spawns or attaches a process: with a live handle it queries; with a cold
+Action it renders durable coordinates and states that session turns require explicit
+=RET= attach. After that existing effect succeeds, traversal may query and repaint. Query
+failure stays visible.
+
+*** Node identity and order
+
+A TraversalNode uses source identity, never its rendered title:
+
+#+begin_example
+turn        Entry id
+ask         (action-id ask-id)
+binding     (intention-id kind reference)
+observed    (action-id path)
+git         (change-owner path)
+action      action-id
+intention   intention-id
+#+end_example
+
+=parent-id= is a relation, not part of the turn id. Observed and Git never share
+an id. =RET= on observed visits the file; =RET= on Git visits Magit.
+
+If the adapter cannot supply a stable entry id, that node may be shown for this buffer but
+must be marked ephemeral and cannot promise exact restoration after rebuild. One Action
+has at most one ephemeral in-flight node; when an id arrives, that node becomes it.
+Do not hash display text into counterfeit durable identity. Session order follows source
+order within one parentage branch; timestamps orient but do not override ancestry.
+
+*** Head
+
+Head is a pointer, not a type, not an Ask, not a pair.
+
+Per Action:
+
+- If auspice is aloft (or lift with a live overlay), Head is the in-flight
+  assistant node. =last-response= overlays its body; it is not an id.
+- Else Head is the last complete =:role assistant= Entry in adapter snapshot
+  order.
+- Else Head is the Action heading (cold, lift without overlay, or missing
+  entries).
+
+If that assistant Entry has a user =parent-id=, open the parent as disclosure.
+Point stays on the assistant. Without =parent-id=, do not pair. Children stay
+folded. A quiet count is allowed; kinship is not.
+
+A pending Ask is =?= on that turn. =a= opens React. =t= returns to Head.
+
+Per Intention subject, choose an Action first, then that Action's Head:
+
+1. an Action whose auspice is lift or aloft
+2. else an Action with a pending Ask
+3. else the Action with newest =created-at= (tie: action id)
+
+Magpi computes Head. Adapter =:complete= only means the snapshot is not truncated.
+
+Older prompts and responses default folded to one-line landmarks. =TAB= changes only the
+section at point. Expand-all is not a permanent HUD control; it may live in a Transient if
+real use earns it.
+
+New events advance Head but do not steal point or window start from a user inspecting an
+older node. If head-follow is set (point was on Head), it follows the new Head. Refresh
+preserves the selected semantic node and lets Magit preserve ordinary visibility.
+
+*** Opening and movement
+
+=t= opens or reuses traversal at the typed surface under point. =C-c m t= is the global
+door. Resolution is: ask/file → owning Action → owning Intention when any; Action → its
+Intention when any; Intention → itself; standalone Action → itself. With no typed target,
+one unambiguous project subject may default; several subjects require completion. A
+default never silently changes ownership.
+
+Inside traversal, =t= returns to Head. =n/p= move section headings, =TAB= folds, =RET=
+visits the selected node's owner, =a= opens React when applicable, =g= requeries live
+facts and repaints, and =q= calls =quit-window=. No action buttons or permanent key legend
+occupy the buffer. Transient and the echo area provide requested discoverability.
+
+Do not bind =t= in ordinary Magit buffers, where it belongs to tags. Magpi owns it only in
+Magpi modes. Do not use =h= or =H= for traversal.
+
+*** Return
+
+Every outward Magpi crossing is a departure event. Theatre records a ReturnAddress
+before that display (Xref's law). Landing is a later event: resolve the Address
+against Nodes that exist now.
+
+#+begin_example
+ReturnAddress(
+  repository_key,                  ; git-common-dir; the ring
+  display_root,                    ; checkout to stand in
+  owner,                           ; status or traversal subject, never buffer name
+  target,                          ; typed Magpi target
+  ancestry,                        ; root-to-leaf (section-type . value)
+  marker?, window_start?,          ; live accelerators
+  generation?)                     ; paint generation at capture
+#+end_example
+
+Buffer name, heading text, list index, and raw point are not identity. The ring
+is per Repository. The buffer is per Checkout. Same-basename projects differ by
+=git-common-dir=. Markers and windows are used only while live and still the
+recorded Section.
+
+A bounded project-local back/forward ring: record before departure; a new
+departure clears the forward branch; walk does not record itself; dead addresses
+are skipped with a message. =C-c m b= returns and =C-c m f= moves forward.
+Ordinary temporary-buffer return remains =q= / =quit-window=. Entry uses
+=pop-to-buffer= or another cooperative =display-buffer= path so user display
+policy and =quit-restore= remain authoritative.
+
+Landing, as consequence of current state:
+
+| Now | Consequence |
+|-----+-------------|
+| Repository gone | no move; report the broken return |
+| owner buffer missing | reopen from =display_root= and subject id |
+| leaf Section still a Node | land on it |
+| marker live, same generation, same Section | may reuse the marker |
+| else | point on that heading; window start only if that window still shows it |
+| leaf gone | nearest surviving ancestor; name the loss |
+| Action gone | Intention, then status root |
+
+Degraded return states what was lost: =ask disappeared; returned to action=. It never lands
+on an unrelated row at the same integer position. Full =window-state-get/put= replay is
+not ordinary return: it can overwrite window changes the user made after departure and is
+therefore absent until a separate workspace-restore need is demonstrated.
+
+Magit's visibility cache owns folds across normal refresh. Return reveals only the target
+ancestry. Magpi does not maintain a second global fold database.
+
+*** User paths
+
+The implementation must exercise these paths as journeys, not isolated commands:
+
+| Origin | Move | Expected destination and return |
+|--------+------+---------------------------------|
+| status Intention | =t= | Intention traversal; Head of the chosen Action, or empty Action list |
+| status Action | =t= | owning Intention traversal focused Action; standalone stays Action root |
+| status ask/path/file | =t= | owning Action node with full ancestry revealed |
+| arbitrary project buffer | =C-c m t= | one subject defaults; several prompt; none explains absence |
+| cold Action | =t= | durable cold outline only; no process; =RET= explicitly attaches |
+| attached Action | =g= / expand | entries query; Head resolves without moving non-head point |
+| traversal turn | =RET= | Pimacs owner/depth; origin ReturnAddress recorded |
+| traversal observed path | =RET= | source file; origin recorded |
+| traversal Git path | =RET= | Magit depth; origin recorded |
+| traversal ask | =a= / =RET= | React; resolved/missing ask degrades to Action |
+| destination | =q= | cooperative =quit-window= restoration when destination supports it |
+| any crossed surface | =C-c m b/f= | semantic back/forward; no recursive recording; stay put if Repository gone |
+| status/traversal repaint | event / =g= | same semantic point and ordinary folds |
+| killed owner buffer | return | reconstruct owner, exact identity, then ancestry fallback |
+| removed node | return | named degradation; never unrelated same-position row |
+| two same-basename repos | any | =git-common-dir= keeps buffers, rings, and subjects distinct |
+
+*** Honest limits
+
+Traversal is maximally reconstructable, not omniscient:
+
+- Pi/Pimacs entries can reconstruct turns while the session remains queryable.
+- Current Observation can show pending asks and the latest reported response this Emacs.
+- Intention audit can prove Magpi-owned effects such as bind, release, merge, and discard.
+- Git can prove current or committed change, not conversational attribution.
+- Ask dispatch currently has no durable attempted/confirmed receipt.
+- Event normalization currently loses raw ids/timestamps not present in final entries.
+- Process restart may rebuild launch from current defaults rather than the original launch.
+
+These limits are rendered as cold, partial, observed, or unknown. They do not justify a
+transcript store, event journal, database, daemon, or speculative persistence.
+
+* Persistence
+
+File grammar for Surfaces / State. When to read or write is Surfaces, not here.
+
+=.git/magpi/{intentions,actions}/<id>.el= is repository-private recovery
+metadata, not Git history and not clone-portable. Extra keys round-trip.
+Timestamps are integer unix. Oids are strings Git would accept. Unknown
+=:type= in audit is kept. Unreadable files stay visible. Atomic replace
+uses a temp *beside* the destination.
+
+Action file: id, intention-id?, chat-ref, created-at; standalone also
+title and spawn-oid. First write freezes chat-ref to the Action id so nil
+is not two histories.
+
+Intention file: why, bindings, branch, base-ref, base-oid, repo-relative
+worktree path, state, writer lease, audit. The store directory is the root;
+do not persist source-root. =base-oid= is =git rev-parse= of =base-ref= at
+birth. Later =rev-parse --verify=: present, missing, or never stored
+(unknown — not backfilled from =main=). Magpi does not keep the object.
+Work range is =base-oid..HEAD=. Dirt is the worktree.
+
+Membership: =Action.intention-id= is the join. Status and Magit metadata
+index RAM Actions; Intention files do not store =action-ids=.
+Pimacs owns the chat buffer: killing it kills the agent. Magpi does not
+keep a process without that buffer. Spawn in a Magpi-inside-Pi Emacs
+drops parent =PI_SESSION_*= so the child cannot inherit the operator
+session.
+
+States: =active=, =merged=, =discarded=. Richer states only with a user
+operation that needs them.
+
+Git owns history. Pimacs owns chat. Files own contents. No transcript
+store, database, journal, or daemon in anticipation.
+Traversal content, query cache, ReturnAddresses, markers, windows, head-follow state, and
+fold theatre are session-local. Reconstruction uses existing Intention/Action files and
+Git facts immediately, then Action id → explicit adapter attach → session entries when the
+user chooses that existing effect. Adapter/session unavailability is an honest limit, not
+a reason to copy chat into =.git/magpi=.
+* Checks
+
+Test Magpi's promises, not its call graph. Do not mock Git. Neutralize
+identity, global config, and temp location. On failure, retain the
+repository and print its path. Transient layout is a declarative
+contract; asserting that =require= was called is not.
+
+| Promise | How |
+|---------+-----|
+| Labels become semantic launch options | Compare the options plist |
+| Launch freezes model/thinking/role/bind | Real Transient layout + live args |
+| Access is always w\|r | Init/format on the live switch |
+| Status opens on a Git root | Real Magit buffer, real repo |
+| Create collects an intention string | Observable owner result |
+| One intention, one change; exclusive writer is opt-in =W= | Real Git worktree/branch/lease |
+| Missing Git facts stay missing | Real facts API over absent paths |
+| Same Pi session after kill/RET/hydrate | Host =make test-life-pi=; never Magpi sandbox |
+| Auspice is a projection of Observation | Table: nil→cold, starting→lift, running→aloft, idle→rest, disconnect/problem→blood; pending ask does not change auspice |
+| Cold is not lift | File kernel without theatre paints still sky, not lift |
+| Motion is still cast | 5 columns; blood is centered =*=; hour word only if the glyph will not hold |
+| =t= resolves surface → subject without changing ownership | Typed status targets; one/many subject cases |
+| Entries reconstruct without a Magpi transcript | Fake adapter entries + explicit known-id attach; assert =t= neither spawns nor writes |
+| Head is live or last assistant, not Ask | Live overlay; complete assistant; missing parent does not pair; pending ask stays =?= |
+| Intention Head chooses Action then Entry | lift/aloft, else pending ask, else newest =created-at= |
+| Refresh preserves point and folds away from head | Real Magit sections plus event-timer refresh |
+| Return lands from current identities | Repaint, killed buffer, duplicate observed/git path, same-basename =git-common-dir= |
+| Missing leaf degrades; missing Repository stays | Ask→Action→Intention named; gone repo does not move |
+| Display respects Emacs policy | =pop-to-buffer= / =quit-window= seam tests |
+| Tonal hierarchy survives user themes and TTY | Face inheritance; dark/light/16-colour/monochrome manual matrix |
+
+Presentation glyphs may iterate. When a motion glyph exists, its column width
+is stable; that check belongs with presentation, not identity.
+
+#+begin_src sh
+make test          # unit + seams
+make test-unit     # no Magit package tree
+make test-seams    # real Magit + Transient
+make test-life     # Git plays in a second Emacs
+make test-life-pi  # Pi reconnect; host Emacs, not Magpi's Landlock child
+make compile       # byte-compile Magpi; print warnings
+make xref          # unused symbols, unbound commands, isolation
+make instrument    # compile + xref
+#+end_src
+
+=make test-seams= and life plays load Magit/Pimacs from
+=MAGPI_STRAIGHT_BUILD=. Doom loads =emacs/= as a local package. =make
+test= does not run life-pi.
+
+* Build order
+
+Each step must improve the loop on its own.
+
+** 1. Close one intention loop
+
+Create, bind, spawn, edit in the worktree, return, inspect through Magit, React
+(release, then merge or discard).
+
+Gate: the journey works without evaluating Lisp.
+
+** 2. Establish the native glance
+
+In =magpi-status.el=: typed Magit sections, the auspice projection, heading
+column order, theme-inherited semantic faces, point-preserving refresh, and
+progressive disclosure. The authored why remains the root. Glyphs may iterate.
+
+Gate: every auspice is legible without motion; point and folds survive =g= and
+event repaint; cold is not lift; pending ask does not recode auspice.
+
+** 3. Make intervention and uncertainty honest
+
+Pending ask and fault marks, proof beneath consequential questions, and React
+at point. Partial spawn, stale observation, missing worktree, writer recovery, and
+failed merge/discard never acquire invented success.
+
+Gate: the operator can distinguish lift, aloft, ask overlay, rest, blood, and
+quiescent from the heading; interruption cannot silently free ownership.
+
+** 4. Add motion only to lifecycle edges
+
+Motion only after still auspice is complete. Motion is a discrete one-way change
+on lift → aloft → rest and any → blood. It never animates fold, point movement,
+refresh, evidence retention, or an idle row. Reduced-motion remains fully legible.
+
+Gate: removing animation loses no state; refresh does not blink a row; no timer outlives
+its Action or mutates identity.
+
+** 5. Make traversal and return effortless
+
+Add typed section inverse resolution and cooperative display before traversal. Then add
+adapter entries, subject/Head resolution, =t=, and bounded semantic ReturnAddresses.
+Persist no transcript. Visit chats, observed files, and Git paths as distinct Nodes.
+
+Gate: from any Magpi-owned crossing the user can return to the same semantic node, or an
+honestly named surviving ancestor; a missing Repository does not move point; traversal
+rebuilds from owned files and an available Pi session without writing Magpi state.
+
+** 6. Observe real use
+
+Measure wrong-target actions, time to Git evidence, manual reconstruction, stale leases,
+history query failure, degraded returns, and work lost on Emacs exit. Remove friction
+before adding architecture.
+
+** 7. Decide whether a runtime is earned
+
+Only if Emacs/Pimacs fails the loop: survive Emacs exit; process ownership Pimacs cannot
+provide; multiple clients; recovery beyond the audit; recurrent harm.
+
+First prove one external owner, one reconnect, one rejected stale control. If that proof
+removes no observed limitation, do not integrate. If earned, it owns only runtime facts —
+not markers, Magit, intention, traversal, or chat.
+
+* Deliberately absent
+
+Until evidence demands them: Elixir/OTP daemon; event sourcing; attention
+inbox; workflow graph; retries and automatic approval; multiple worktrees per
+intention; fleet and federation; generic backend platform; Org as runtime state;
+a Pair type; adapter-authored Head; a Magpi transcript store.
+
+* Immediate next step
+
+Gate 3 holds: heading distinguishes lift, aloft, ask overlay, rest, blood, and
+quiescent; pending Ask is =?= only; lease stays =w=; disconnect does not free
+the lease. React at point refuses invented success.
+
+Build step 4: motion only on lift → aloft → rest and any → blood. Do not begin
+Traversal until that gate.
