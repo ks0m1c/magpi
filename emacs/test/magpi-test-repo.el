@@ -5,6 +5,7 @@
 (require 'cl-lib)
 (require 'ert)
 
+(defvar magpi-home-directory)
 (defvar magpi-test-repo--counter 0)
 
 (defun magpi-test-repo--run (directory &rest args)
@@ -53,13 +54,16 @@ Identity, system config, and initial branch are neutralized."
   "Bind a neutralized temporary Git repository around BODY.
 
 SPEC is (ROOT-VAR) or (ROOT-VAR PREFIX).
-On success the repository is deleted.  On failure it is retained and its
-path is reported before the error is re-signalled."
+On success the repository and Magpi garden are deleted.  On failure they
+are retained and their paths are reported before the error is re-signalled."
   (declare (indent 1) (debug ((symbolp &optional stringp) body)))
   (let ((root (car spec))
         (prefix (or (cadr spec) "magpi-test-repo-"))
-        (ok (make-symbol "ok")))
+        (ok (make-symbol "ok"))
+        (garden (make-symbol "garden")))
     `(let* ((,root (magpi-test-repo-create ,prefix))
+            (,garden (make-temp-file "magpi-test-garden-" t))
+            (magpi-home-directory ,garden)
             (,ok nil))
        (unwind-protect
            (prog1 (progn ,@body)
@@ -67,10 +71,14 @@ path is reported before the error is re-signalled."
          (cond
           (,ok
            (when (file-directory-p ,root)
-             (delete-directory ,root t)))
-          ((file-directory-p ,root)
-           (message "Magpi test evidence retained: %s" ,root)))))))
-
+             (delete-directory ,root t))
+           (when (file-directory-p ,garden)
+             (delete-directory ,garden t)))
+          (t
+           (when (file-directory-p ,root)
+             (message "Magpi test evidence retained: %s" ,root))
+           (when (file-directory-p ,garden)
+             (message "Magpi test garden retained: %s" ,garden))))))))
 (defalias 'magpi-test-repo-git #'magpi-test-repo--run)
 
 (provide 'magpi-test-repo)

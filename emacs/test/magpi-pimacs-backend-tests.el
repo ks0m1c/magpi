@@ -104,6 +104,32 @@
                              '(:kind point :file "lib/auth.ex" :line 12))))
           (_handle (magpi-backend-spawn (make-magpi-pimacs-backend) action #'ignore)))
      (should (equal magpi-pimacs-test--name "lib/auth.ex:12 · action-1234")))))
+
+(ert-deftest magpi-pimacs-backend-sends-launch-source-when-prompt-is-nil ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (action (make-magpi-action
+                    :id "action-1234"
+                    :launch (magpi-launch-build
+                             "/tmp/" 'medium 'writer
+                             '(:kind point :file "lib/auth.ex" :line 12
+                               :text "refresh()"))))
+          (handle (magpi-backend-spawn backend action #'ignore)))
+     (should-not magpi-pimacs-test--sent)
+     (magpi-backend-send-initial backend handle action)
+     (should (string-match-p "lib/auth.ex:12" (car magpi-pimacs-test--sent)))
+     (should (string-match-p "refresh()" (car magpi-pimacs-test--sent))))))
+
+(ert-deftest magpi-pimacs-backend-nil-prompt-without-source-sends-nothing ()
+  (magpi-pimacs-test-with-backend
+   (let* ((backend (make-magpi-pimacs-backend))
+          (action (make-magpi-action
+                    :id "action-1234"
+                    :launch (magpi-launch-build
+                             "/tmp/" 'medium 'writer '(:kind none))))
+          (handle (magpi-backend-spawn backend action #'ignore)))
+     (magpi-backend-send-initial backend handle action)
+     (should-not magpi-pimacs-test--sent))))
 (ert-deftest magpi-pimacs-backend-compiles-explicit-requested-model ()
   (magpi-pimacs-test-with-backend
    (let* ((action (magpi-pimacs-test-action 'low))

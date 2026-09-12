@@ -1,5 +1,10 @@
 ;;; magpi-intention.el --- Intention being: why, change, lease, audit -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
+
 ;; An intention is why: durable objective, change, lease, and audit.  Actions reference it.
 
 (require 'cl-lib)
@@ -15,24 +20,92 @@
   "Explicit intention transitions; merged and discarded are terminal.")
 
 (defconst magpi-intention-fields
-  '(:id :objective :bindings :worktree-path :branch :base-ref :base-oid
+  '(:id :objective :bindings :target-ref :genesis-oid
     :state :writer-lease :audit :created-at)
   "Coordinates Magpi persists.  Names keep their meaning.")
 
 (defconst magpi-intention-absorbed
-  '(:lifecycle :version :type :task-ids :action-ids :source-root)
-  "Classified names.  :lifecycle still reads as :state; the rest are not extras.")
+  '(:lifecycle :version :type :task-ids :action-ids :source-root
+    :worktree-path :branch :base-ref :base-oid)
+  "Classified names.  :lifecycle still reads as :state; the rest are not extras.
+Old :base-ref / :base-oid load as :target-ref / :genesis-oid.")
 
 (defconst magpi-intention-keys
   (append magpi-intention-fields magpi-intention-absorbed))
 
 (cl-defstruct magpi-intention
-  id objective bindings worktree-path branch base-ref base-oid state
+  id objective bindings target-ref genesis-oid state
   writer-lease audit source-root created-at extras)
 
 (defalias 'magpi-git #'magpi-store-git)
 (defalias 'magpi-git--maybe #'magpi-store-git-maybe)
 (defalias 'magpi-git--repository-root #'magpi-store-toplevel)
+
+(defcustom magpi-home-directory (expand-file-name "~/.magpi/")
+  "Global Magpi home for change checkouts.
+
+Change trees live at worktrees/<repository-key>/<id>/.
+One user option, not a per-repository override.  Must not fall
+inside a Git checkout.  Location is a birth hint; live Git wins."
+  :type 'directory
+  :group 'magpi)
+
+(defun magpi-intention--inside-git-p (directory)
+  "Return non-nil when DIRECTORY is inside a Git work tree.
+
+Uncreated DIRECTORY is judged by the nearest existing ancestor."
+  (let ((dir (and directory (expand-file-name directory))))
+    (while (and dir (not (file-exists-p dir)))
+      (let ((parent (file-name-directory (directory-file-name dir))))
+        (setq dir (unless (or (null parent) (equal parent dir)) parent))))
+    (and dir
+         (equal "true"
+                (magpi-git--maybe dir "rev-parse" "--is-inside-work-tree")))))
+
+(defun magpi-intention--home ()
+  "Return Magpi's global home, or refuse a home inside a Git checkout."
+  (let ((home (file-name-as-directory (expand-file-name magpi-home-directory))))
+    (when (magpi-intention--inside-git-p home)
+      (user-error "Magpi home %s falls inside a Git checkout" home))
+    home))
+
+(defun magpi-intention--repository-key (root)
+  "Return a collision-safe garden key for ROOT's canonical Git directory.
+
+The digest is of git-common-dir.  The prefix is the directory that holds
+.git, not whichever linked checkout invoked Magpi."
+  (let* ((common (or (magpi-store-common-dir root)
+                     (user-error "No Git directory for %s" root)))
+         (digest (substring (sha1 (directory-file-name
+                                   (expand-file-name common)))
+                            0 12))
+         (repo (file-name-directory (directory-file-name common)))
+         (name (file-name-nondirectory (directory-file-name repo))))
+    (format "%s-%s"
+            (if (string-empty-p name) "repo" name)
+            digest)))
+
+(defun magpi-intention--garden-parent (root)
+  "Return the garden directory that holds ROOT's change checkouts."
+  (expand-file-name (magpi-intention--repository-key root)
+                    (expand-file-name "worktrees" (magpi-intention--home))))
+
+(defun magpi-intention--preferred-path (root id)
+  "Return the garden path Magpi would create for ID in ROOT's repository."
+  (unless (magpi-store-id-p id)
+    (error "Invalid Magpi id"))
+  (file-name-as-directory
+   (expand-file-name id (magpi-intention--garden-parent root))))
+
+(define-error 'magpi-blocked "Magpi blocked" 'user-error)
+
+(defun magpi-intention-blocked (surface directory message &optional subject)
+  "Signal `magpi-blocked' so porcelain can land Magit on DIRECTORY.
+
+SUBJECT is the Magit log range when SURFACE is `log'."
+  (signal 'magpi-blocked
+          (append (list message :surface surface :directory directory)
+                  (and subject (list :subject subject)))))
 
 (defun magpi-intention--file (root id)
   (magpi-store-file root 'intentions id))
@@ -59,13 +132,8 @@
    (list :id (magpi-intention-id intention)
          :objective (magpi-intention-objective intention)
          :bindings (magpi-intention-bindings intention)
-         :worktree-path (or (magpi-store-relative
-                             (magpi-intention-source-root intention)
-                             (magpi-intention-worktree-path intention))
-                            (magpi-intention-worktree-path intention))
-         :branch (magpi-intention-branch intention)
-         :base-ref (magpi-intention-base-ref intention)
-         :base-oid (magpi-intention-base-oid intention)
+         :target-ref (magpi-intention-target-ref intention)
+         :genesis-oid (magpi-intention-genesis-oid intention)
          :state (magpi-intention-state intention)
          :writer-lease (magpi-intention-writer-lease intention)
          :audit (magpi-intention-audit intention)
@@ -84,10 +152,8 @@ Folder and id are enough.  The only live alias is :lifecycle → :state."
      :id id
      :objective (plist-get data :objective)
      :bindings (plist-get data :bindings)
-     :worktree-path (magpi-store-absolute root (plist-get data :worktree-path))
-     :branch (plist-get data :branch)
-     :base-ref (plist-get data :base-ref)
-     :base-oid (plist-get data :base-oid)
+     :target-ref (or (plist-get data :target-ref) (plist-get data :base-ref))
+     :genesis-oid (or (plist-get data :genesis-oid) (plist-get data :base-oid))
      :state (or (plist-get data :state) (plist-get data :lifecycle))
      :writer-lease (plist-get data :writer-lease)
      :audit (plist-get data :audit)
@@ -142,27 +208,24 @@ Folder and id are enough.  The only live alias is :lifecycle → :state."
           (append (magpi-intention-audit intention) (list entry)))
     next))
 
-(defun magpi-intention--slug (objective)
-  (let ((slug (downcase (replace-regexp-in-string
-                         "[^[:alnum:]]+" "-" (or objective "work")))))
-    (setq slug (string-trim slug "-+" "-+"))
-    (if (string-empty-p slug) "work" (substring slug 0 (min 32 (length slug))))))
-
 (defun magpi-intention-create-record (objective root &optional id)
   "Create and persist a lightweight active intention for OBJECTIVE at ROOT.
 
 Creating an intention only records the authored objective.  Its Git worktree is
 created lazily by `magpi-intention-ensure-worktree' when work actually starts."
-  (let ((intention (make-magpi-intention
-                    :id (or id (magpi-store-new-id))
-                    :objective objective :bindings nil
-                    :worktree-path nil :branch nil :base-ref nil :base-oid nil
-                    :state 'active
-                    :writer-lease nil :audit nil
-                    :source-root (magpi-git--repository-root root)
-                    :created-at (magpi-store-unix-time))))
-    (setq intention (magpi-intention--append intention 'created))
-    (magpi-intention-save intention)))
+  (let ((id (or id (magpi-store-new-id))))
+    (unless (magpi-store-id-p id)
+      (error "Invalid Magpi id"))
+    (let ((intention (make-magpi-intention
+                      :id id
+                      :objective objective :bindings nil
+                      :target-ref nil :genesis-oid nil
+                      :state 'active
+                      :writer-lease nil :audit nil
+                      :source-root (magpi-git--repository-root root)
+                      :created-at (magpi-store-unix-time))))
+      (setq intention (magpi-intention--append intention 'created))
+      (magpi-intention-save intention))))
 
 (defun magpi-intention--worktree-for-branch (source branch)
   "Return (:path PATH :head OID) for BRANCH in SOURCE, or nil."
@@ -181,84 +244,201 @@ created lazily by `magpi-intention-ensure-worktree' when work actually starts."
           (setq found (list :path path :head head))))))
     found))
 
-(defun magpi-intention--record-worktree (intention path branch base-ref base-oid)
+(defun magpi-intention-branch (intention)
+  "Return INTENTION's derived change branch.  Id determines the name."
+  (let ((id (magpi-intention-id intention)))
+    (when id
+      (unless (magpi-store-id-p id)
+        (error "Invalid Magpi id"))
+      (format "magpi/%s" id))))
+
+(defun magpi-intention-worktree-path (intention)
+  "Return the live checkout of INTENTION's change branch, or nil."
+  (let ((root (magpi-intention-source-root intention)))
+    (and root
+         (plist-get (magpi-intention--worktree-for-branch
+                     root (magpi-intention-branch intention))
+                    :path))))
+
+(defun magpi-intention--under-garden-p (directory)
+  "Return non-nil when DIRECTORY is under this repository's garden."
+  (let ((here (and directory
+                   (file-directory-p directory)
+                   (file-name-as-directory (file-truename directory))))
+        garden)
+    (when here
+      (setq garden (ignore-errors
+                     (file-name-as-directory
+                      (file-truename (magpi-intention--garden-parent here)))))
+      (and garden (string-prefix-p garden here)))))
+
+(defun magpi-intention--change-checkout-p (here primary)
+  "Return non-nil when HERE is a Magpi change checkout, not PRIMARY."
+  (and here primary
+       (not (file-equal-p here primary))
+       (or (magpi-intention--under-garden-p here)
+           (let ((ref (magpi-git--maybe
+                       here "symbolic-ref" "--quiet" "--short" "HEAD")))
+             (and ref (string-prefix-p "magpi/" ref))))))
+
+(defun magpi-intention-glance-root (directory)
+  "Return the Magpi glance checkout for DIRECTORY.
+
+A Magpi change worktree is not a second Magpi.  Glance opens on the
+repository's primary worktree."
+  (let* ((directory (and directory
+                         (file-name-as-directory (expand-file-name directory))))
+         (here (and directory (ignore-errors (magpi-store-toplevel directory))))
+         (primary (and here (magpi-store-primary-worktree here))))
+    (cond
+     ((and here primary (magpi-intention--change-checkout-p here primary))
+      primary)
+     (here here)
+     (t directory))))
+(defun magpi-intention--git-path-exists-p (directory name)
+  "Return non-nil when Git path NAME exists in DIRECTORY's git-dir."
+  (let ((path (and directory
+                   (magpi-git--maybe directory "rev-parse" "--git-path" name))))
+    (and path
+         (file-exists-p (if (file-name-absolute-p path)
+                            path
+                          (expand-file-name path directory))))))
+
+(defun magpi-intention--merge-in-progress-p (directory)
+  (magpi-intention--git-path-exists-p directory "MERGE_HEAD"))
+
+(defun magpi-intention--short-ref (ref)
+  (and ref (replace-regexp-in-string "\\`refs/heads/" "" ref)))
+
+(defun magpi-intention--heads-ref (ref)
+  "Return REF as refs/heads/… when it is a short branch name."
+  (cond
+   ((null ref) nil)
+   ((string-prefix-p "refs/" ref) ref)
+   (t (concat "refs/heads/" ref))))
+
+(defun magpi-intention-destination (intention)
+  "Query Git for INTENTION's merge destination.
+
+Return (:ref REF :oid OID :path CHECKOUT-OR-NIL) when the ref exists.
+Missing is nil.  A vacant checkout is not a missing branch."
+  (let* ((source (magpi-intention-source-root intention))
+         (ref (magpi-intention-target-ref intention))
+         (root (or (magpi-intention-worktree-path intention) source))
+         (oid (and root ref
+                   (condition-case nil
+                       (magpi-git root "rev-parse" "--verify" ref)
+                     (error nil))))
+         (held (and oid source
+                    (magpi-intention--worktree-for-branch source ref))))
+    (and oid (list :ref ref :oid oid :path (plist-get held :path)))))
+
+(defun magpi-intention--integrated-p (directory branch target-ref)
+  "Return non-nil when BRANCH is already an ancestor of TARGET-REF in DIRECTORY."
+  (and directory branch target-ref
+       (magpi-git--maybe directory "merge-base" "--is-ancestor"
+                         branch target-ref)))
+
+(defun magpi-intention--fast-forward-p (directory branch target-ref)
+  "Return non-nil when TARGET-REF is an ancestor of BRANCH in DIRECTORY."
+  (and directory branch target-ref
+       (magpi-git--maybe directory "merge-base" "--is-ancestor"
+                         target-ref branch)))
+
+(defun magpi-intention--invoking (source invoking)
+  "Return INVOKING when it is a checkout of SOURCE's repository."
+  (let* ((invoking (file-name-as-directory
+                    (expand-file-name (or invoking source))))
+         (source-common (magpi-store-common-dir source))
+         (invoking-common (magpi-store-common-dir invoking)))
+    (unless (and source-common invoking-common
+                 (file-equal-p source-common invoking-common))
+      (user-error "Invoking checkout is not this intention's repository"))
+    invoking))
+
+(defun magpi-intention--attached-head (directory)
+  "Return (:ref REF :oid OID) for DIRECTORY's attached HEAD.
+
+Detached HEAD is not an integration destination."
+  (let ((ref (magpi-git--maybe directory "symbolic-ref" "--quiet" "HEAD")))
+    (unless ref
+      (magpi-intention-blocked
+       'status directory
+       "Intention birth needs a branch, not detached HEAD"))
+    (list :ref ref :oid (magpi-git directory "rev-parse" ref))))
+
+(defun magpi-intention--target-for-birth (intention invoking)
+  "Return (:ref REF :oid OID) already on INTENTION, or read INVOKING now.
+
+A stored target-ref without genesis-oid stays unknown.
+Do not fill genesis from a moving tip."
+  (let ((ref (magpi-intention-target-ref intention))
+        (oid (magpi-intention-genesis-oid intention)))
+    (cond
+     ((and ref oid) (list :ref ref :oid oid))
+     (ref (list :ref ref :oid nil))
+     (t (magpi-intention--attached-head invoking)))))
+
+(defun magpi-intention--record-change (intention target-ref genesis-oid)
   (let ((next (copy-magpi-intention intention)))
-    (setf (magpi-intention-worktree-path next) (file-name-as-directory path)
-          (magpi-intention-branch next) branch
-          (magpi-intention-base-ref next) base-ref
-          (magpi-intention-base-oid next) base-oid)
+    (setf (magpi-intention-target-ref next) target-ref
+          (magpi-intention-genesis-oid next) genesis-oid)
     (setq next (magpi-intention--append next 'worktree-created
-                                        :path path :base-ref base-ref
-                                        :base-oid base-oid :branch branch))
+                                        :target-ref target-ref
+                                        :genesis-oid genesis-oid
+                                        :branch (magpi-intention-branch intention)))
     (magpi-intention-save next)))
 
-(defun magpi-intention-ensure-worktree (intention)
-  "Create INTENTION's managed worktree only when a task needs it.
+(defun magpi-intention--add-change (source branch path genesis-oid)
+  "Add PATH as BRANCH at GENESIS-OID.  An existing branch is checked out, not recreated."
+  (when (file-exists-p path)
+    (user-error "A checkout already occupies the planned path for %s" branch))
+  (make-directory (magpi-intention--garden-parent source) t)
+  (if (magpi-git--maybe source "show-ref" "--verify" "--quiet"
+                        (concat "refs/heads/" branch))
+      (magpi-git source "worktree" "add" path branch)
+    (magpi-git source "worktree" "add" "-b" branch path genesis-oid))
+  (let ((head (magpi-git path "rev-parse" "HEAD")))
+    (unless (or (equal head genesis-oid)
+                (magpi-git--maybe source "show-ref" "--verify" "--quiet"
+                                  (concat "refs/heads/" branch)))
+      (user-error "Worktree HEAD is not genesis oid %s" genesis-oid))
+    head))
 
-Birth resolves a full destination ref to a base oid once and creates the
-worktree from that oid.  An interrupted birth on the planned branch is adopted.
-Detached HEAD cannot be a merge destination."
+(defun magpi-intention-ensure-worktree (intention &optional invoking)
+  "Create INTENTION's change checkout only when a task needs it.
+
+Birth records the invoking checkout's attached HEAD as target-ref and
+freezes genesis-oid, then adds magpi/<id> at the garden path.  An existing
+checkout of that branch is adopted; no checkout is switched.  Detached
+HEAD cannot be a target."
   (unless (eq (magpi-intention-state intention) 'active)
     (user-error "Intention %s is %s" (magpi-intention-id intention)
                 (magpi-intention-state intention)))
   (let* ((source (magpi-intention-source-root intention))
-         (path (magpi-intention-worktree-path intention)))
+         (invoking (magpi-intention--invoking source invoking))
+         (branch (magpi-intention-branch intention))
+         (existing (magpi-intention--worktree-for-branch source branch)))
     (cond
-     ((and path (file-directory-p path)) intention)
+     ((and existing (magpi-intention-genesis-oid intention)) intention)
      (t
-      (when (and path (not (file-directory-p path)))
-        (when-let ((found (and (magpi-intention-branch intention)
-                               (magpi-intention--worktree-for-branch
-                                source (magpi-intention-branch intention)))))
-          (setf path (plist-get found :path))
-          (let ((next (copy-magpi-intention intention)))
-            (setf (magpi-intention-worktree-path next) path)
-            (setq intention (magpi-intention-save next)))))
-      (if (and (magpi-intention-worktree-path intention)
-               (file-directory-p (magpi-intention-worktree-path intention)))
-          intention
-        (let* ((base-ref (magpi-git--maybe source "symbolic-ref" "--quiet" "HEAD"))
-               (id (magpi-intention-id intention))
-               (branch (or (magpi-intention-branch intention)
-                           (format "magpi/%s-%s"
-                                   (magpi-intention--slug
-                                    (magpi-intention-objective intention))
-                                   id)))
-               (path (or path
-                         (expand-file-name
-                          (format ".magpi-worktrees/%s-%s"
-                                  (file-name-nondirectory
-                                   (directory-file-name source))
-                                  id)
-                          (file-name-directory (directory-file-name source)))))
-               (existing (magpi-intention--worktree-for-branch source branch)))
-          (unless base-ref
-            (user-error "Intention birth needs a branch, not detached HEAD"))
-          (let ((base-oid (magpi-git source "rev-parse" base-ref)))
-            (cond
-             (existing
-              (let ((head (plist-get existing :head)))
-                (magpi-intention--record-worktree
-                 intention (plist-get existing :path) branch base-ref
-                 (and (equal head base-oid) base-oid))))
-             (t
-              (when (file-exists-p path)
-                (user-error "Magpi intention path already exists: %s" path))
-              (make-directory (file-name-directory path) t)
-              (if (magpi-git--maybe source "show-ref" "--verify" "--quiet"
-                                    (concat "refs/heads/" branch))
-                  (magpi-git source "worktree" "add" path branch)
-                (magpi-git source "worktree" "add" "-b" branch path base-oid))
-              (let ((head (magpi-git path "rev-parse" "HEAD")))
-                (unless (or (equal head base-oid)
-                            (magpi-git--maybe source "show-ref" "--verify"
-                                              "--quiet"
-                                              (concat "refs/heads/" branch)))
-                  (user-error "Worktree HEAD is not birth oid %s" base-oid))
-                (magpi-intention--record-worktree
-                 intention path branch base-ref
-                 (and (equal head base-oid) base-oid))))))))))))
-
+      (let* ((target (if existing
+                         (magpi-intention--attached-head invoking)
+                       (magpi-intention--target-for-birth intention invoking)))
+             (target-ref (plist-get target :ref))
+             (genesis-oid (plist-get target :oid))
+             (path (or (plist-get existing :path)
+                       (magpi-intention--preferred-path
+                        source (magpi-intention-id intention))))
+             (head (or (plist-get existing :head)
+                       (and genesis-oid
+                            (magpi-intention--add-change
+                             source branch path genesis-oid)))))
+        (unless (or existing genesis-oid)
+          (user-error "Unknown genesis; this intention's work is unavailable"))
+        (magpi-intention--record-change
+         intention target-ref
+         (and (equal head genesis-oid) genesis-oid)))))))
 (defun magpi-intention-bind (intention kind reference &optional label tags)
   "Bind KIND and REFERENCE to INTENTION, optionally labelled and TAGS.
 
@@ -356,8 +536,8 @@ every further writer.  Readers never take the lease."
 (defun magpi-intention-git-facts (intention)
   "Return truthful live Git facts for INTENTION; unknown facts stay nil.
 
-Dirt is the worktree.  Drift is current base-ref versus HEAD.  Work against
-base-oid is a separate question; missing origin is not filled from a moving ref."
+Dirt is the worktree.  Drift is current target-ref versus HEAD.  Work against
+genesis-oid is a separate question; missing genesis is not filled from a moving ref."
   (let* ((path (magpi-intention-worktree-path intention))
          (exists (and path (file-directory-p path)))
          (status (and exists (magpi-git--maybe path "status" "--porcelain")))
@@ -366,15 +546,15 @@ base-oid is a separate question; missing origin is not filled from a moving ref.
          (wrong (and exists (magpi-intention-branch intention)
                      (not (magpi-intention--refs-same-p
                            head-ref (magpi-intention-branch intention)))))
-         (base-ref (magpi-intention-base-ref intention))
-         (counts (and exists base-ref
+         (target-ref (magpi-intention-target-ref intention))
+         (counts (and exists target-ref
                       (magpi-git--maybe
                        path "rev-list" "--left-right" "--count"
-                       (format "%s...HEAD" base-ref))))
+                       (format "%s...HEAD" target-ref))))
          (parts (and counts (split-string counts "[ \t]+" t)))
-         (oid (magpi-intention-base-oid intention))
+         (oid (magpi-intention-genesis-oid intention))
          (oid-ok (and exists oid (magpi-git--maybe path "cat-file" "-e" oid)))
-         (checkout (cond ((null path) 'unstarted)
+         (checkout (cond ((null oid) 'unstarted)
                          ((not exists) 'missing)
                          ((null status) 'unavailable)
                          (wrong 'wrong-branch)
@@ -384,10 +564,10 @@ base-oid is a separate question; missing origin is not filled from a moving ref.
           :behind (and parts (string-to-number (car parts)))
           :ahead (and parts (string-to-number (cadr parts)))
           :exists exists
-          :origin (cond ((null oid) 'unknown)
-                        ((not exists) nil)
-                        (oid-ok 'present)
-                        (t 'missing))
+          :genesis (cond ((null oid) 'unknown)
+                         ((not exists) nil)
+                         (oid-ok 'present)
+                         (t 'missing))
           :work (and oid-ok
                      (string-to-number
                       (or (magpi-git--maybe path "rev-list" "--count"
@@ -395,13 +575,13 @@ base-oid is a separate question; missing origin is not filled from a moving ref.
                           ""))))))
 
 (defun magpi-intention-work-range (intention)
-  "Return Magit's work range for INTENTION, or signal unknown origin.
+  "Return Magit's work range for INTENTION, or signal unknown genesis.
 
-Never falls back to a moving base-ref.  That would relabel drift as work."
+Never falls back to a moving target-ref.  That would relabel drift as work."
   (magpi-store-frozen-range
    (or (magpi-intention-worktree-path intention)
-       (user-error "Unknown origin; this intention's work is unavailable"))
-   (magpi-intention-base-oid intention)))
+       (user-error "Unknown genesis; this intention's work is unavailable"))
+   (magpi-intention-genesis-oid intention)))
 
 (defun magpi-intention--guard-quiescent (intention operation)
   (unless (eq (magpi-intention-state intention) 'active)
@@ -411,58 +591,13 @@ Never falls back to a moving base-ref.  That would relabel drift as work."
                 operation
                 (plist-get (magpi-intention-writer-lease intention) :action-id))))
 
-(defun magpi-intention-merge-record (intention)
-  "Guard, merge INTENTION into its recorded base ref, and persist object ids.
-
-A merge-started receipt is saved before Git mutates.  On Git failure the
-intention stays active, a merge-failed audit is saved, and the error is
-re-signalled so React can land in Magit."
-  (magpi-intention--guard-quiescent intention "merge")
-  (let ((source (magpi-intention-source-root intention))
-        (path (magpi-intention-worktree-path intention))
-        (branch (magpi-intention-branch intention))
-        (base-ref (magpi-intention-base-ref intention)))
-    (unless (and path (file-directory-p path) branch)
-      (user-error "Start an action before merging this intention"))
-    (unless (string-empty-p (magpi-git path "status" "--porcelain"))
-      (user-error "Refusing to merge dirty intention worktree"))
-    (unless (string-empty-p (magpi-git source "status" "--porcelain"))
-      (user-error "Refusing to merge into dirty checkout: %s" source))
-    (unless (magpi-intention--refs-same-p
-             (magpi-git--maybe source "symbolic-ref" "--quiet" "HEAD")
-             base-ref)
-      (user-error "Source checkout is not on intention base %s" base-ref))
-    (let ((from-oid (magpi-git source "rev-parse" "HEAD")))
-      (setq intention
-            (magpi-intention-save
-             (magpi-intention--append
-              intention 'merge-started
-              :branch branch :base-ref base-ref :from-oid from-oid)))
-      (unless (equal (magpi-git source "rev-parse" "HEAD") from-oid)
-        (user-error "Source HEAD moved before merge"))
-      (condition-case err
-          (progn
-            (magpi-git source "merge" "--no-ff" branch)
-            (let* ((to-oid (magpi-git source "rev-parse" "HEAD"))
-                   (next (magpi-intention--append
-                          intention 'merged
-                          :branch branch :base-ref base-ref
-                          :from-oid from-oid :to-oid to-oid)))
-              (magpi-intention-set-state next 'merged)))
-        (error
-         (magpi-intention-save
-          (magpi-intention--append
-           intention 'merge-failed
-           :branch branch :base-ref base-ref :from-oid from-oid
-           :reason (error-message-string err)))
-         (signal (car err) (cdr err)))))))
-
 (defun magpi-intention-discard-record (intention)
   "Persist discarded, then force-remove leftover worktree if it remains."
   (magpi-intention--guard-quiescent intention "discard")
   (let* ((path (magpi-intention-worktree-path intention))
+         (branch (magpi-intention-branch intention))
          (next (magpi-intention-set-state
-                (magpi-intention--append intention 'discarded :path path)
+                (magpi-intention--append intention 'discarded :branch branch)
                 'discarded)))
     (when (and path (file-directory-p path))
       (condition-case err
@@ -470,11 +605,12 @@ re-signalled so React can land in Magit."
             (magpi-git (magpi-intention-source-root next)
                        "worktree" "remove" "--force" path)
             (setq next (magpi-intention-save
-                        (magpi-intention--append next 'worktree-removed :path path))))
+                        (magpi-intention--append next 'worktree-removed
+                                                 :branch branch))))
         (error
          (magpi-intention-save
           (magpi-intention--append
-           next 'worktree-remove-failed :path path
+           next 'worktree-remove-failed :branch branch
            :reason (error-message-string err)))
          (signal (car err) (cdr err)))))
     next))
@@ -483,16 +619,16 @@ re-signalled so React can land in Magit."
   "Remove a terminal INTENTION worktree without changing its disposition."
   (unless (memq (magpi-intention-state intention) '(merged discarded))
     (user-error "Refusing to clean up nonterminal intention"))
-  (if (file-directory-p (magpi-intention-worktree-path intention))
-      (progn
-        (magpi-git (magpi-intention-source-root intention)
-                              "worktree" "remove" "--force"
-                              (magpi-intention-worktree-path intention))
-        (let ((next (magpi-intention--append
-                     intention 'worktree-removed
-                     :path (magpi-intention-worktree-path intention))))
-          (magpi-intention-save next)))
-    intention))
+  (let ((path (magpi-intention-worktree-path intention))
+        (branch (magpi-intention-branch intention)))
+    (if (and path (file-directory-p path))
+        (progn
+          (magpi-git (magpi-intention-source-root intention)
+                     "worktree" "remove" "--force" path)
+          (magpi-intention-save
+           (magpi-intention--append intention 'worktree-removed
+                                    :branch branch)))
+      intention)))
 
 (provide 'magpi-intention)
 ;;; magpi-intention.el ends here

@@ -1,5 +1,10 @@
 ;;; magpi-store.el --- Repository-private plist records -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
+
 ;; One job: read and write inert Magpi files.  Git names objects; this
 ;; folder remembers Magpi's pointers.  Unknown keys survive.  Missing
 ;; fields are absent; this store is local, not a protocol.
@@ -46,6 +51,17 @@
                              common
                            (expand-file-name common root)))))))
 
+(defun magpi-store-primary-worktree (root)
+  "Return the main worktree of ROOT's repository, or nil.
+
+Git lists the primary checkout first."
+  (let ((text (magpi-store-git-maybe root "worktree" "list" "--porcelain")))
+    (when text
+      (catch 'found
+        (dolist (line (split-string text "\n"))
+          (when (string-prefix-p "worktree " line)
+            (throw 'found
+                   (file-name-as-directory (substring line 9)))))))))
 (defun magpi-store-directory (root)
   "Return the repository-private Magpi folder for ROOT, or nil."
   (when-let ((common (magpi-store-common-dir root)))
@@ -128,27 +144,29 @@ Nil values are omitted."
     (error (make-magpi-unreadable
             :path file :error (error-message-string err)))))
 
-(defun magpi-store-id-ok (id file)
-  "Return non-nil when ID is a path-safe stem equal to FILE's base name."
+(defun magpi-store-id-p (id)
+  "Return non-nil when ID is a single path-safe identity stem."
   (and (stringp id)
        (not (string-empty-p id))
+       (not (member id '("." "..")))
+       (not (string-prefix-p "~" id))
        (not (string-match-p "[/\\\\]" id))
+       (equal id (file-name-nondirectory id))))
+
+(defun magpi-store-id-ok (id file)
+  "Return non-nil when ID is a path-safe stem equal to FILE's base name."
+  (and (magpi-store-id-p id)
        (equal id (file-name-base file))))
 
-(defun magpi-store-relative (root path)
-  "Return PATH relative to ROOT when both are known."
-  (and root path (file-relative-name (expand-file-name path)
-                                     (file-name-as-directory
-                                      (expand-file-name root)))))
+(defun magpi-store-oid-ancestor-p (directory oid ref)
+  "Return non-nil when OID is an ancestor of REF in DIRECTORY.
 
-(defun magpi-store-absolute (root path)
-  "Return PATH as an absolute locator against ROOT.  Absolute PATH is kept."
-  (cond
-   ((null path) nil)
-   ((file-name-absolute-p path) path)
-   (root (expand-file-name path (file-name-as-directory
-                                 (expand-file-name root))))
-   (t path)))
+OID is a frozen locator, not a keep-alive.  Missing oid, ref, or object is nil."
+  (and (stringp oid) (not (string-empty-p oid))
+       (stringp ref) (not (string-empty-p ref))
+       directory
+       (magpi-store-git-maybe directory "cat-file" "-e" oid)
+       (magpi-store-git-maybe directory "merge-base" "--is-ancestor" oid ref)))
 
 (defun magpi-store-frozen-range (directory oid &optional ancestor-of-head)
   "Return Magit range OID..HEAD in DIRECTORY.
@@ -156,13 +174,13 @@ Nil values are omitted."
 OID is a frozen locator, not a keep-alive.  Missing stays missing.
 Standalone Magit doors pass ANCESTOR-OF-HEAD: the oid must still reach HEAD."
   (unless (and (stringp oid) (not (string-empty-p oid)))
-    (user-error "Unknown origin"))
+    (user-error "Unknown frozen oid"))
   (unless (and directory
                (magpi-store-git-maybe directory "cat-file" "-e" oid))
-    (user-error "Origin %s is missing from Git" oid))
+    (user-error "Frozen oid %s is missing from Git" oid))
   (when ancestor-of-head
-    (unless (magpi-store-git-maybe directory "merge-base" "--is-ancestor" oid "HEAD")
-      (user-error "Spawn origin is not an ancestor of HEAD")))
+    (unless (magpi-store-oid-ancestor-p directory oid "HEAD")
+      (user-error "Spawn oid is not an ancestor of HEAD")))
   (format "%s..HEAD" oid))
 
 (defun magpi-store-list (root kind)

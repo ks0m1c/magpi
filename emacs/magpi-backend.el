@@ -1,5 +1,10 @@
 ;;; magpi-backend.el --- Stable adapter contract for Magpi -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
+
 ;; One job: the action adapter contract.  Catalog fill is launch UX and lives
 ;; on a registered filler, not this protocol.
 ;;
@@ -19,9 +24,9 @@ input.  It must not mutate ACTION directly.")
 
 This narrow operation runs only after `magpi-backend-spawn' has installed the
 listener.  Adapters compile their transport-specific session name and flags at
-launch, and compile the initial prompt here, from ACTION's semantic launch
-specification.  A second call must not re-deliver the same instruction: retry
-is a new action, never a restated prompt.")
+launch, and compile the initial prompt here, from ACTION's prompt and
+launch-local source.  Intention `@' bindings are not that message.  A second
+call must not re-deliver the same instruction: retry is a new action, never a restated prompt.")
 
 (cl-defgeneric magpi-backend-visit (backend handle)
   "Visit HANDLE's session or transcript.")
@@ -60,7 +65,7 @@ A chat buffer is UI, not liveness.")
   "Return a glance label while HANDLE is filling session history, or nil.
 
 `get_entries' and lazy transcript paint are porcelain, not a model turn.
-Nil means nothing is filling; a string is a status meta mark only.")
+Nil means nothing is filling; a string occupies the quiet history seat only.")
 
 (cl-defmethod magpi-backend-history-pending ((_backend t) _handle) nil)
 

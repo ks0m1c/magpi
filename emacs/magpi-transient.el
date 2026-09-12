@@ -1,7 +1,12 @@
-;;; magpi-transient.el --- Spawn surface: model, thinking, role, bind -*- lexical-binding: t; -*-
+;;; magpi-transient.el --- Spawn surface: model, thinking, role, source -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
 
 ;; One job: collect launch choices and hand them to orchestration.
-
+;; Source is launch-local capture, not the `@' Bind power.
 (require 'transient)
 (require 'magpi-launch)
 
@@ -38,7 +43,7 @@ Installed by Magpi orchestration so the transient can autoload alone.")
                      (magpi-launch-default-model))))
 
 (defun magpi-launch--read-context (prompt initial-input _history)
-  (completing-read prompt '("Point" "Region" "None")  ; None = do not bind
+  (completing-read prompt '("Point" "Region" "None")  ; None = do not capture
                    nil t initial-input nil
                    (magpi-launch-bind-label
                     (magpi-launch-default-bind))))
@@ -58,7 +63,8 @@ Installed by Magpi orchestration so the transient can autoload alone.")
 (defun magpi-launch--options-from-args (args)
   "Translate transient ARGS into a semantic options plist.
 
-Intention membership is Transient scope, not a special variable."
+Intention membership is Transient scope, not a special variable.
+`:bind' is launch-local source, not an Intention `@' binding."
   (append
    (list :thinking (magpi-launch-thinking-from-label
                     (transient-arg-value "--thinking=" args))
@@ -82,7 +88,9 @@ Intention membership is Transient scope, not a special variable."
   (funcall magpi-launch-execute-function
            (magpi-launch--options-from-args (transient-args 'magpi-launch))))
 
-;;;###autoload
+;; loaddefs copies unknown ;;;###autoload forms into magpi-autoloads.el.
+;; Doom evaluates that file before Transient: void-function.
+;;;###autoload (autoload 'magpi-launch "magpi-transient" nil t)
 (transient-define-prefix magpi-launch (intention-id)
   "Configure the single frozen specification for a Magpi action."
   :init-value #'magpi-launch--initial-values
@@ -90,7 +98,7 @@ Intention membership is Transient scope, not a special variable."
     ("m" "Model" "--model=" :reader magpi-launch--read-model)
     ("t" "Thinking" "--thinking=" :reader magpi-launch--read-thinking)]
    ["Scope"
-    ("c" "Bind" "--context=" :reader magpi-launch--read-context)
+    ("c" "Source" "--context=" :reader magpi-launch--read-context)
     ("w" "Role (Writer/Reader)" "--role=" :class magpi-launch-role-switch
      :choices ("w" "r")
      :argument-format "--role=%s"

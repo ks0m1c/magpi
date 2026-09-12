@@ -1,17 +1,39 @@
 ;;; magpi.el --- Magpi porcelain: intention, action, bind, react -*- lexical-binding: t; -*-
-;; Version: 0.1.0
-;; Keywords: tools git
-;; Package-Requires: ((emacs "29.1") (magit "3.0") (transient "0.4") (pimacs "0.6"))
 
-;; One job: registry and effects for Intention and Action.
-;; Bind and React are powers; glance is status; depth is Magit; adapter is Pimacs.
-;; Effects ask semantic section selectors, not glance taxonomy (facet TYPE.VALUE).
+;; Copyright (C) 2026 ks0m1c_dharma
+
+;; Author: ks0m1c_dharma <johndoe@dharma.in>
+;; Maintainer: ks0m1c_dharma <johndoe@dharma.in>
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "29.1") (magit "3.0") (transient "0.4") (pimacs "0.6"))
+;; Keywords: tools git vc
+;; URL: https://github.com/ks0m1c/magpi
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is not part of GNU Emacs.
+
+;; This program is free software: you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 ;;; Commentary:
 
 ;; Magpi is a tiny intention-first Emacs porcelain for deliberate Pi work.
 ;; It does not replace Magit, Transient, or Pimacs: glance is Magit-mode,
 ;; launch is Transient, chat is Pimacs, and Git remains Git.
+;;
+;; One job: registry and effects for Intention and Action.
+;; Bind and React are powers; glance is status; depth is Magit; adapter is Pimacs.
+;; Effects ask semantic section selectors, not glance taxonomy (facet TYPE.VALUE).
 
 ;;; Code:
 (require 'project)
@@ -38,6 +60,9 @@
 (declare-function magit-diff-range "magit-diff")
 (declare-function magit-log-range "magit-log")
 (declare-function magit-commit-create "magit-commit")
+(declare-function magit-merge-editmsg "magit-merge")
+(declare-function magit-merge "magit")
+(declare-function magit-worktree "magit-worktree")
 (declare-function magit-refresh-buffer "magit-mode")
 (declare-function magpi-react--transient nil)
 (defun magpi--status-ready-p ()
@@ -73,9 +98,13 @@ load merely to discover root or absence of intention."
 (defvar magpi--handles (make-hash-table :test #'equal)
   "Opaque adapter handles by action ID; never part of the domain record.")
 
+(defvar magpi--listener-epochs (make-hash-table :test #'equal)
+  "Listener generation by action ID.  A bump revokes saved callbacks.")
 (defvar magpi--intentions (make-hash-table :test #'equal)
   "Latest persisted intention record by intention ID.")
 
+(defvar magpi--worktree-jump nil
+  "Last worktree jump: (INTENTION-ID . work) or (INTENTION-ID . source).")
 (defvar-local magpi-intention-metadata nil
   "Intention metadata handed to Magit: id, objective, lease, audit, chat refs.")
 
@@ -93,6 +122,8 @@ load merely to discover root or absence of intention."
 
 (defvar magpi--refresh-timer nil)
 
+(defvar magpi--coalesce-paint nil
+  "Non-nil while an adapter listener may coalesce glance paints.")
 (defun magpi--live-chats ()
   "Return live Pimacs chat buffers, last-seen first.
 
@@ -124,13 +155,17 @@ Unseen actions are omitted; status appends them in display order."
         (push id ids)))
     (nreverse ids)))
 
+;;;###autoload
 (defvar-keymap magpi-command-map
-  :doc "Global Magpi prefix: status, bind, spawn, and discard.  Extra I/R/M stay out."
+  :doc "Global Magpi prefix: status, bind, spawn, worktree, and discard.  Extra I/R/M stay out."
   "m" #'magpi-status
   "s" #'magpi-spawn
   "i" #'magpi-intention-create
   "@" #'magpi-bind
+  "v" #'magpi-visit-worktree
   "k" #'magpi-discard)
+
+;;;###autoload
 (keymap-global-set "C-c m" magpi-command-map)
 
 (defun magpi--root ()
@@ -172,35 +207,25 @@ Miss is not birth.  Unreadable files stay out of the table."
       (gethash id magpi--intentions)
       (user-error "Unknown Magpi intention: %s" id)))
 
+;;;###autoload
 (defun magpi-intention-create (intent)
-  "Create or reuse a lightweight persisted intention for INTENT."
+  "Create a lightweight persisted intention for INTENT.
+
+Always mints a new id.  Objective text is why, not identity.
+Reuse an existing intention by visiting or selecting it."
   (interactive (list (read-string "Intention: ")))
   (let* ((intent (or (magpi-normalize-objective intent)
                      (user-error "An intention needs a description")))
-         (root (magpi--root))
-         (existing (seq-find
-                   (lambda (candidate)
-                     (and (eq (magpi-intention-state candidate) 'active)
-                          (equal (magpi-intention-objective candidate) intent)))
-                   (magpi--intentions-for-root root))))
-    (let ((result
-           (if existing
-               (progn
-                 (puthash (magpi-intention-id existing) existing magpi--intentions)
-                 (message "Using existing Magpi intention %s"
-                          (magpi-intention-id existing))
-                 existing)
-             (let ((intention (magpi-intention-create-record intent root)))
-               (puthash (magpi-intention-id intention) intention magpi--intentions)
-               (message "Magpi intention %s created; press @ to add context"
-                        (magpi-intention-id intention))
-               intention))))
-      (when (derived-mode-p 'magpi-status-mode)
-        (magit-refresh-buffer)
-        (goto-char (point-min))
-        (when (re-search-forward (regexp-quote (magpi-intention-objective result)) nil t)
-          (beginning-of-line)))
-      result)))
+         (intention (magpi-intention-create-record intent (magpi--root))))
+    (puthash (magpi-intention-id intention) intention magpi--intentions)
+    (message "Magpi intention %s created; press @ to add context"
+             (magpi-intention-id intention))
+    (magpi--paint-glance)
+    (when (derived-mode-p 'magpi-status-mode)
+      (goto-char (point-min))
+      (when (re-search-forward (regexp-quote (magpi-intention-objective intention)) nil t)
+        (beginning-of-line)))
+    intention))
 
 (defun magpi--read-intention-id (&optional prompt)
   "Read one active intention ID, displaying its authored objective."
@@ -277,33 +302,42 @@ Observation or auspice."
     ('action '("File" "Past chat" "Point" "Region"))
     (_ '("File" "Past chat"))))
 
-(defun magpi--bind-point-or-region (kind)
-  "Capture KIND (`point' or `region') as a bind reference plist."
+(defun magpi--capture-source (kind)
+  "Freeze KIND (`point' or `region') from the current source file."
   (unless (magpi-launch-source-buffer-p)
-    (user-error "Bind %s needs a source file, not porcelain" kind))
-  (if (eq kind 'region)
-      (progn
-        (unless (use-region-p)
-          (user-error "No active region"))
-        (list :kind 'region
-              :reference (format "%s:%s-%s"
-                                 (file-name-nondirectory buffer-file-name)
-                                 (line-number-at-pos (region-beginning))
-                                 (line-number-at-pos (region-end)))
-              :label (format "%s:%s" (file-name-nondirectory buffer-file-name)
-                             (line-number-at-pos (region-beginning)))
-              :file buffer-file-name
-              :text (buffer-substring-no-properties (region-beginning) (region-end))))
-    (list :kind 'point
-          :reference (format "%s:%s"
-                             (file-name-nondirectory buffer-file-name)
-                             (line-number-at-pos))
-          :label (format "%s:%s" (file-name-nondirectory buffer-file-name)
-                         (line-number-at-pos))
-          :file buffer-file-name
-          :text (string-trim
-                 (buffer-substring-no-properties
-                  (line-beginning-position) (line-end-position))))))
+    (user-error "Magpi bind %s needs a source file, not porcelain" kind))
+  (pcase kind
+    ('region
+     (unless (use-region-p)
+       (user-error "No active region"))
+     (let ((beg (region-beginning))
+           (end (region-end))
+           (file buffer-file-name))
+       (list :kind 'region
+             :file file
+             :line (line-number-at-pos beg)
+             :end-line (line-number-at-pos end)
+             :text (buffer-substring-no-properties beg end))))
+    ('point
+     (list :kind 'point
+           :file buffer-file-name
+           :line (line-number-at-pos)
+           :text (string-trim
+                  (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position)))))
+    (_ (user-error "Unknown Magpi bind kind: %S" kind))))
+
+(defun magpi--bind-point-or-region (kind)
+  "Capture KIND as a bind reference plist for `@'."
+  (let* ((captured (magpi--capture-source kind))
+         (base (file-name-nondirectory (plist-get captured :file)))
+         (line (plist-get captured :line))
+         (end (plist-get captured :end-line)))
+    (append captured
+            (list :reference (if end
+                                 (format "%s:%s-%s" base line end)
+                               (format "%s:%s" base line))
+                  :label (format "%s:%s" base line)))))
 
 (defun magpi--bind-to-intention (intention kind &optional tags)
   "Persist KIND context on INTENTION.  Bound context is never a prompt."
@@ -369,7 +403,7 @@ Kinds: file, chat, point, region.  Bound context is never silently a prompt."
               (intention (magpi--intention id)))
          (setq intention (magpi--bind-to-intention intention kind tags))
          (puthash id intention magpi--intentions)
-         (magpi--schedule-refresh)
+         (magpi--paint-glance)
          (message "Bound on %s" (magpi-intention-objective intention))))
       ('action
        (magpi--bind-ephemeral kind))
@@ -378,77 +412,57 @@ Kinds: file, chat, point, region.  Bound context is never silently a prompt."
               (intention (magpi--intention id)))
          (setq intention (magpi--bind-to-intention intention kind tags))
          (puthash id intention magpi--intentions)
-         (magpi--schedule-refresh)
+         (magpi--paint-glance)
          (message "Bound on %s" (magpi-intention-objective intention))))
       (_
        (user-error "Nothing to bind at point; open status or stand on a surface")))))
 
-(defun magpi-intention-merge (intention-id)
-  "Merge persisted INTENTION-ID into its recorded base branch."
-  (interactive
-   (progn
-     (magpi--intentions-for-root (magpi--root))
-     (list (completing-read
-            "Merge intention: "
-            (let (choices)
-              (maphash (lambda (id intention)
-                         (push (cons (format "%s · %s"
-                                             (magpi-intention-objective intention) id)
-                                     id)
-                               choices))
-                       magpi--intentions)
-              choices)
-            nil t))))
-  (let ((intention (magpi--intention intention-id)))
-    (setq intention (magpi-intention-merge-record intention))
-    (puthash intention-id intention magpi--intentions)
-    (message "Merged Magpi intention %s" (magpi-intention-objective intention))
-    intention))
-
 (defun magpi--capture-bind (kind)
-  "Freeze one Bind moment KIND into the launch specification.
+  "Freeze launch-local source KIND into the launch specification.
 
-The same power as `@': point/region are source evidence; none means do not bind.
-Porcelain buffers are never source.  Spawn calls this; `@' persists or glances."
+This is not `@'.  `@' persists a durable Intention reference or a
+look-here glance.  Spawn captures point/region as this-doing's source
+so the adapter can compose a first message.  None means do not capture.
+Porcelain buffers are never source."
   (pcase kind
     ('none (list :kind 'none))
-    ((or 'region 'point)
-     (unless (magpi-launch-source-buffer-p)
-       (user-error "Magpi bind %s needs a source file, not porcelain"
-                   kind))
-     (if (eq kind 'region)
-         (progn
-           (unless (use-region-p)
-             (user-error "No active region"))
-           (list :kind 'region
-                 :file buffer-file-name
-                 :line (line-number-at-pos (region-beginning))
-                 :text (buffer-substring-no-properties
-                        (region-beginning) (region-end))))
-       (list :kind 'point
-             :file buffer-file-name
-             :line (line-number-at-pos)
-             :text (string-trim
-                    (buffer-substring-no-properties
-                     (line-beginning-position) (line-end-position))))))
-    (_ (user-error "Unknown Magpi bind kind: %S" kind))))
+    ((or 'region 'point) (magpi--capture-source kind))
+    (_ (user-error "Unknown Magpi source kind: %S" kind))))
+
+(defun magpi--revoke-listeners (id)
+  "Make saved adapter callbacks for ID inert.
+
+Discard and a later attach must mint a new generation so an obsolete
+listener cannot restore Observation."
+  (puthash id (1+ (or (gethash id magpi--listener-epochs) 0))
+           magpi--listener-epochs))
+
+(defun magpi--listener (id)
+  "Return a listener that reduces events for ID on the current generation.
+
+Adapter time coalesces glance paints.  Operator time does not bind this."
+  (let ((epoch (gethash id magpi--listener-epochs)))
+    (lambda (event)
+      (when (and epoch (eq epoch (gethash id magpi--listener-epochs)))
+        (let ((magpi--coalesce-paint t))
+          (magpi--handle-event id event))))))
 
 (defun magpi--handle-event (id event)
-  "Reduce EVENT into the latest action for immutable ID, then refresh.
+  "Reduce EVENT into the latest action for immutable ID, then paint.
 
-The listener captures only ID.  This is the one mutation point for the action
-registry; reduction itself is functional.  Restated facts keep the same action
-object and do not schedule another paint.
+Installed listeners capture ID and generation.  This is the one mutation
+point for the action registry; reduction itself is functional.  Restated
+facts keep the same action object and do not request another paint.
 History fill is porcelain: it repaints glance without minting Observation."
   (when-let ((action (gethash id magpi--actions)))
     (if (eq (plist-get event :type) 'history-pending)
-        (magpi--schedule-refresh)
+        (magpi--paint-glance)
       (let ((next (magpi-action-reduce action event)))
         (unless (eq next action)
           (puthash id next magpi--actions)
           ;; Disconnection is uncertainty, not terminal proof.  A persisted writer
           ;; lease remains held until an explicit, attributable release.
-          (magpi--schedule-refresh))))))
+          (magpi--paint-glance))))))
 
 (defun magpi--record-launch-problem (action error-data)
   "Return ACTION marked as disconnected after launch ERROR-DATA."
@@ -476,39 +490,57 @@ Liveness is the agent process, not a chat buffer."
 (defun magpi--attach (id action &optional resume)
   "Spawn ACTION for ID and store the handle.  RESUME skips send-initial.
 
-Does not rewrite ACTION except to record an attributable launch failure."
+Revokes obsolete listeners, then `reconnected' starts this attempt so an
+old attachment's failure is cleared.  Spawn evidence after that is kept;
+a returned handle does not clear it.  Launch failure still records
+disconnect."
   (let (handle spawn-tried)
-    (condition-case error-data
-        (progn
-          (setq spawn-tried t
-                handle (magpi-backend-spawn
-                        magpi-backend action
-                        (lambda (event) (magpi--handle-event id event))))
-          (puthash id handle magpi--handles)
-          (unless resume
-            (magpi-backend-send-initial magpi-backend handle action))
-          (when-let ((launch (magpi-action-launch action)))
-            (magpi-launch-refresh-catalog (magpi-launch-spec-root launch) handle)))
-      (error
-       (when spawn-tried
-         (let ((attributable (or (gethash id magpi--actions) action)))
-           (puthash id (magpi--record-launch-problem attributable error-data)
-                    magpi--actions)
-           (when handle
-             (puthash id handle magpi--handles))
-           (message "Magpi launch for %s failed: %s"
-                    id (error-message-string error-data))))))
-    (magpi--schedule-refresh)
+    (let ((magpi--coalesce-paint t))
+      (condition-case error-data
+          (progn
+            (magpi--revoke-listeners id)
+            (magpi--handle-event id '(:type reconnected))
+            (setq spawn-tried t
+                  handle (magpi-backend-spawn
+                          magpi-backend action
+                          (magpi--listener id)))
+            (puthash id handle magpi--handles)
+            (unless resume
+              (magpi-backend-send-initial magpi-backend handle action))
+            (when-let ((launch (magpi-action-launch action)))
+              (magpi-launch-refresh-catalog (magpi-launch-spec-root launch) handle)))
+        (error
+         (when spawn-tried
+           (let ((attributable (or (gethash id magpi--actions) action)))
+             (puthash id (magpi--record-launch-problem attributable error-data)
+                      magpi--actions)
+             (when handle
+               (puthash id handle magpi--handles))
+             (message "Magpi launch for %s failed: %s"
+                      id (error-message-string error-data)))))))
+    (magpi--paint-glance)
     (gethash id magpi--actions)))
 
+(defun magpi--grouped-checkout (action)
+  "Return the live intention checkout for grouped ACTION.
+
+Standalone Actions return nil.  A grouped Action without a live
+checkout fails visibly.  Never manufactures a checkout."
+  (when-let ((intention-id (magpi-action-intention-id action)))
+    (let* ((intention (or (gethash intention-id magpi--intentions)
+                          (ignore-errors (magpi--intention intention-id))))
+           (work (and intention (magpi-intention-worktree-path intention))))
+      (or work
+          (user-error "This action has no live intention checkout")))))
+
 (defun magpi--resume-root (action)
-  "Return the project root to reopen ACTION."
-  (or (and (magpi-action-launch action)
+  "Return the project root to reopen ACTION.
+
+Grouped Actions require the live intention checkout.  Standalone
+Actions keep launch root, source-root, then the current repository."
+  (or (magpi--grouped-checkout action)
+      (and (magpi-action-launch action)
            (magpi-launch-spec-root (magpi-action-launch action)))
-      (when-let ((intention-id (magpi-action-intention-id action))
-                 (intention (or (gethash intention-id magpi--intentions)
-                                (ignore-errors (magpi--intention intention-id)))))
-        (magpi-intention-worktree-path intention))
       (magpi-action-source-root action)
       (magpi--root)))
 
@@ -526,22 +558,46 @@ Does not rewrite ACTION except to record an attributable launch failure."
       (puthash id next magpi--actions)
       next)))
 
+(defun magpi--guard-exclusive-writer (action)
+  "Refuse attaching ACTION when another writer holds the exclusive claim."
+  (when (eq (and (magpi-action-launch action)
+                 (magpi-launch-spec-role (magpi-action-launch action)))
+            'writer)
+    (when-let* ((intention-id (magpi-action-intention-id action))
+                (intention (or (ignore-errors (magpi--intention intention-id))
+                               (gethash intention-id magpi--intentions)))
+                (held (plist-get (magpi-intention-writer-lease intention)
+                                 :action-id)))
+      (unless (equal held (magpi-action-id action))
+        (user-error "Intention already has writer %s" held)))))
+
+(defun magpi--authorize-attach (action)
+  "Validate ownership and checkout before attaching ACTION.
+
+Writer lease and grouped checkout are this boundary.  Live visit does
+not pass here.  Never manufactures a checkout."
+  (magpi--guard-exclusive-writer action)
+  (magpi--grouped-checkout action)
+  action)
+
 (defun magpi--ensure-process (id &optional resume)
   "Bring ID's agent up from known process state.  Action must already exist.
 
 live visits; dead respawns without send-initial; absent attaches.
 RESUME non-nil skips send-initial (reopen / retry).  Dead always resumes.
-Never creates or rebakes an Action.  Miss loads the kernel, then errors."
-  (let ((action (magpi--action-with-launch (magpi--action id))))
-    (pcase (magpi--known-process-state id)
+Never creates or rebakes an Action.  Miss loads the kernel, then errors.
+Dead and absent share one attach authorization."
+  (let ((action (magpi--action-with-launch (magpi--action id)))
+        (state (magpi--known-process-state id)))
+    (pcase state
       ('live
        (magpi-backend-visit magpi-backend (gethash id magpi--handles))
        (gethash id magpi--actions))
-      ('dead
-       (remhash id magpi--handles)
-       (magpi--attach id action t))
-      ('absent
-       (magpi--attach id action resume)))))
+      (_
+       (magpi--authorize-attach action)
+       (when (eq state 'dead)
+         (remhash id magpi--handles))
+       (magpi--attach id action (or (eq state 'dead) resume))))))
 
 (defun magpi--birth (id prompt launch &optional intention-id title)
   "Create one Action: disk kernel plus launch theatre.  Save once.  No process.
@@ -591,11 +647,19 @@ An ID already in RAM or on disk is process retry only: never a second birth."
          (intention (and intention-id (magpi--intention intention-id)))
          ;; A Git change is made only when work begins, not when the user
          ;; captures the intention or its references.
-         (intention (and intention (magpi-intention-ensure-worktree intention)))
+         (intention
+          (and intention
+               (condition-case err
+                   (magpi-intention-ensure-worktree intention (magpi--root))
+                 (error
+                  (magpi--land-blocked err (magpi-intention-source-root intention))
+                  (signal (car err) (cdr err))))))
          (intention-id (and intention (magpi-intention-id intention)))
          (root (if intention
                    (magpi-intention-worktree-path intention)
                  (magpi--root)))
+         ;; Launch-local source, not `@'.  Nil prompt still lets the adapter
+         ;; compose a first message from captured point/region.
          (context (magpi--capture-bind (or (plist-get options :bind) (plist-get options :context-kind))))
          (prompt nil)
          (thinking (if (plist-member options :thinking)
@@ -608,11 +672,12 @@ An ID already in RAM or on disk is process retry only: never a second birth."
          (id (magpi-store-new-id)))
     (puthash intention-id intention magpi--intentions)
     (magpi-launch-remember-model root (plist-get options :model))
-    (magpi--birth id prompt launch intention-id
-                  (and intention (magpi-intention-objective intention)))
+    ;; Admit before birth so a refused writer cannot leave a launchable Action.
     (when intention
       (setq intention (magpi-intention-add-action intention id role exclusive))
       (puthash intention-id intention magpi--intentions))
+    (magpi--birth id prompt launch intention-id
+                  (and intention (magpi-intention-objective intention)))
     (let ((action (magpi--ensure-process id nil)))
       (when (and intention (null action))
         (setq intention (magpi-intention-release-writer intention id "spawn rejected"))
@@ -699,7 +764,7 @@ This is a snapshot pull, not part of event-driven paint."
            (when-let ((handle (magpi--live-handle id)))
              (magpi-backend-reconcile
               magpi-backend handle
-              (lambda (event) (magpi--handle-event id event)))))))
+              (magpi--listener id))))))
      magpi--actions)))
 
 (defun magpi--refresh-visible-buffers ()
@@ -709,11 +774,26 @@ This is a snapshot pull, not part of event-driven paint."
       (when (derived-mode-p 'magpi-status-mode)
         (ignore-errors (magit-refresh-buffer))))))
 
+(defun magpi--refresh-now ()
+  "Paint Magpi status now.  Never `g'."
+  (when (timerp magpi--refresh-timer)
+    (cancel-timer magpi--refresh-timer))
+  (magpi--refresh-visible-buffers))
+
 (defun magpi--schedule-refresh ()
+  "Coalesce glance paint onto idle.  Never `g'."
   (when (timerp magpi--refresh-timer)
     (cancel-timer magpi--refresh-timer))
   (setq magpi--refresh-timer
         (run-with-idle-timer 0.15 nil #'magpi--refresh-visible-buffers)))
+
+(defun magpi--paint-glance ()
+  "Paint Magpi status after registry mutation.  Never `g'.
+
+Operator time is immediate.  Adapter listeners bind `magpi--coalesce-paint'."
+  (if magpi--coalesce-paint
+      (magpi--schedule-refresh)
+    (magpi--refresh-now)))
 
 
 (defun magpi--actions-for-intention (intention-id)
@@ -735,7 +815,7 @@ This is a snapshot pull, not part of event-driven paint."
     (list :intention-id (magpi-intention-id intention)
           :objective (magpi-intention-objective intention)
           :branch (magpi-intention-branch intention)
-          :base-ref (magpi-intention-base-ref intention)
+          :target-ref (magpi-intention-target-ref intention)
           :action-ids (mapcar #'magpi-action-id actions)
           :writer-lease (copy-tree (magpi-intention-writer-lease intention))
           :audit (copy-tree (magpi-intention-audit intention))
@@ -762,6 +842,42 @@ This is a snapshot pull, not part of event-driven paint."
     (let ((default-directory (file-name-as-directory directory)))
       (ignore-errors (magit-status default-directory)))))
 
+(defun magpi--land (surface directory &optional subject)
+  "Open Magit SURFACE for DIRECTORY.
+
+SUBJECT is the intention branch when SURFACE is `merge', or the
+destination range when SURFACE is `log'."
+  (when directory
+    (let ((default-directory (file-name-as-directory directory)))
+      (pcase surface
+        ('commit
+         (if (and (file-directory-p directory) (fboundp 'magit-commit-create))
+             (ignore-errors (call-interactively #'magit-commit-create))
+           (magpi--land-magit directory)))
+        ('merge
+         (cond
+          ((and subject (fboundp 'magit-merge-editmsg))
+           (ignore-errors (magit-merge-editmsg subject)))
+          ((fboundp 'magit-merge)
+           (ignore-errors (call-interactively #'magit-merge)))
+          (t (magpi--land-magit directory))))
+        ('log
+         (if (and subject (fboundp 'magit-log-range))
+             (ignore-errors (magit-log-range subject nil))
+           (magpi--land-magit directory)))
+        ('worktree
+         (if (fboundp 'magit-worktree)
+             (ignore-errors (call-interactively #'magit-worktree))
+           (magpi--land-magit directory)))
+        (_ (magpi--land-magit directory))))))
+(defun magpi--land-blocked (err &optional fallback)
+  "Land Magit from a `magpi-blocked' error, else FALLBACK as status."
+  (let* ((data (and (eq (car err) 'magpi-blocked) (cdr err)))
+         (surface (or (plist-get (cdr data) :surface) 'status))
+         (directory (or (plist-get (cdr data) :directory) fallback))
+         (subject (plist-get (cdr data) :subject)))
+    (magpi--land surface directory subject)
+    err))
 (defun magpi--changes-action (git-action &optional section)
   "Delegate Git GIT-ACTION to Magit from SECTION's Magit lineage."
   (let* ((intention-id (magpi--section-intention-id section))
@@ -770,25 +886,29 @@ This is a snapshot pull, not part of event-driven paint."
     (if intention
         (let* ((path (or (magpi-intention-worktree-path intention)
                          (user-error "Start an action before opening this intention's Git changes"))))
-          (pcase git-action
-            ('status
-             (magit-status path)
-             (magpi--bind-magit-metadata intention))
-            ('diff
-             (let ((default-directory path))
-               (magit-diff-range (magpi-intention-work-range intention) nil))
-             (magpi--bind-magit-metadata intention))
-            ('log
-             (let ((default-directory path))
-               (magit-log-range (magpi-intention-work-range intention) nil))
-             (magpi--bind-magit-metadata intention))
-            ('commit
-             (puthash (file-truename path) (magpi--intention-metadata intention)
-                      magpi--pending-commit-metadata)
-             (let ((default-directory path))
-               (call-interactively #'magit-commit-create))
-             (magpi--bind-magit-metadata intention))
-            (_ (user-error "Unknown Magpi changes action: %S" git-action))))
+          (condition-case err
+              (pcase git-action
+                ('status
+                 (magit-status path)
+                 (magpi--bind-magit-metadata intention))
+                ('diff
+                 (let ((default-directory path))
+                   (magit-diff-range (magpi-intention-work-range intention) nil))
+                 (magpi--bind-magit-metadata intention))
+                ('log
+                 (let ((default-directory path))
+                   (magit-log-range (magpi-intention-work-range intention) nil))
+                 (magpi--bind-magit-metadata intention))
+                ('commit
+                 (puthash (file-truename path) (magpi--intention-metadata intention)
+                          magpi--pending-commit-metadata)
+                 (let ((default-directory path))
+                   (call-interactively #'magit-commit-create))
+                 (magpi--bind-magit-metadata intention))
+                (_ (user-error "Unknown Magpi changes action: %S" git-action)))
+            (error
+             (magpi--land-blocked err path)
+             (signal (car err) (cdr err)))))
       (magpi--standalone-changes git-action action-id))))
 
 (defun magpi--standalone-changes (git-action action-id)
@@ -852,27 +972,164 @@ This is a snapshot pull, not part of event-driven paint."
       (setq intention
             (magpi-intention-release-writer intention action-id "operator recovery"))
       (puthash (magpi-intention-id intention) intention magpi--intentions)
-      (magpi--schedule-refresh)
+      (magpi--paint-glance)
       (message "Released writer %s (operator recovery; Pi is not fenced)" action-id))))
 
+(defun magpi--tracked-porcelain (directory)
+  "Return tracked porcelain for DIRECTORY.
+
+Untracked files are not uncommitted change.  Glance dirt on the change
+may still include them.  Git merge still refuses an overwrite."
+  (magpi-git directory "status" "--porcelain" "--untracked-files=no"))
+
+(defun magpi--merge-sites (intention operation)
+  "Return merge sites for INTENTION after OPERATION's guards.
+
+Dirt of the change is blocked onto that worktree. Destination is
+the recorded target-ref. A vacant checkout of that ref is not
+missing Git. Never switches a checkout."
+  (let* ((source (magpi-intention-source-root intention))
+         (work (magpi-intention-worktree-path intention))
+         (branch (magpi-intention-branch intention))
+         (dest (magpi-intention-destination intention))
+         (target-ref (or (plist-get dest :ref)
+                         (magpi-intention-target-ref intention))))
+    (magpi-intention--guard-quiescent intention operation)
+    (unless (and work (file-directory-p work) branch target-ref)
+      (user-error "Start an action before %s for this intention" operation))
+    (unless dest
+      (user-error "No such branch %s" target-ref))
+    (unless (string-empty-p (magpi--tracked-porcelain work))
+      (magpi-intention-blocked
+       'status work "Uncommitted change lives in the intention worktree"))
+    (list :source source :work work :branch branch
+          :target-ref (plist-get dest :ref)
+          :target (plist-get dest :path)
+          :range (format "%s..%s"
+                         (magpi-intention--short-ref (plist-get dest :ref))
+                         branch))))
+
+(defun magpi--fast-forward-destination (directory branch target-ref)
+  "Fast-forward TARGET-REF to BRANCH in DIRECTORY without a checkout."
+  (let* ((heads (magpi-intention--heads-ref target-ref))
+         (new (magpi-git directory "rev-parse" branch))
+         (old (magpi-git directory "rev-parse" heads)))
+    (magpi-git directory "update-ref" "-m"
+              (format "magpi merge %s" branch)
+              heads new old)))
+
+(defun magpi--record-merged (intention)
+  (setq intention
+        (magpi-intention-set-state
+         intention 'merged
+         "operator merged after Git evidence"))
+  (puthash (magpi-intention-id intention) intention magpi--intentions)
+  (magpi--paint-glance)
+  (message "Recorded merged %s" (magpi-intention-objective intention))
+  intention)
+
+(defun magpi--open-merge (intention)
+  "Open Magit's next merge command for INTENTION. Never records Magpi merged.
+
+Dirt of the change opens Magit status there. A merge in progress opens the
+commit draft. Ready to integrate on a checkout of target-ref opens Magit's
+merge of the intention branch there. A vacant checkout opens Magit log of
+the destination range. Git already containing the branch stays on glance:
+Merge is the disposition."
+  (let ((source (magpi-intention-source-root intention))
+        (work (magpi-intention-worktree-path intention)))
+    (condition-case err
+        (let* ((sites (magpi--merge-sites intention "open merge"))
+               (target (plist-get sites :target))
+               (branch (plist-get sites :branch))
+               (target-ref (plist-get sites :target-ref))
+               (work (plist-get sites :work))
+               (range (plist-get sites :range)))
+          (cond
+           ((and target (magpi-intention--merge-in-progress-p target))
+            (magpi--land 'commit target))
+           ((magpi-intention--integrated-p (or target work) branch target-ref)
+            (message "Git already contains this change; Merge records Magpi merged")
+            intention)
+           (target
+            (magpi--land 'merge target branch)
+            intention)
+           (t
+            (magpi--land 'log work range)
+            intention)))
+      (error
+       (magpi--intentions-for-root source)
+       (magpi--paint-glance)
+       (magpi--land-blocked err (or work source))
+       (signal (car err) (cdr err))))))
+
+(defun magpi--merge (intention)
+  "Merge INTENTION's branch into target-ref.
+
+A live checkout of that ref receives git merge so its files move.
+A vacant checkout fast-forwards the ref when Git allows it. A merge
+commit without a checkout opens Magit log of the destination. Already
+integrated Git records Magpi merged. Magpi does not switch a checkout
+or merge in the change tree."
+  (let ((source (magpi-intention-source-root intention))
+        (work (magpi-intention-worktree-path intention))
+        (target nil))
+    (condition-case err
+        (let* ((sites (magpi--merge-sites intention "merge"))
+               (branch (plist-get sites :branch))
+               (target-ref (plist-get sites :target-ref))
+               (range (plist-get sites :range)))
+          (setq source (plist-get sites :source)
+                work (plist-get sites :work)
+                target (plist-get sites :target))
+          (cond
+           ((and target (magpi-intention--merge-in-progress-p target))
+            (magpi-intention-blocked
+             'status target "Merge already in progress on the target checkout"))
+           ((and target (not (string-empty-p (magpi--tracked-porcelain target))))
+            (magpi-intention-blocked
+             'status target "Uncommitted change lives in the target checkout"))
+           ((magpi-intention--integrated-p (or target work) branch target-ref)
+            (magpi--record-merged intention))
+           (target
+            (condition-case merge-err
+                (magpi-git target "merge" "--no-edit" branch)
+              (error
+               (magpi-intention-blocked
+                'status target (error-message-string merge-err))))
+            (unless (magpi-intention--integrated-p target branch target-ref)
+              (magpi-intention-blocked
+               'status target "Merge did not integrate the intention branch"))
+            (magpi--record-merged intention))
+           ((magpi-intention--fast-forward-p work branch target-ref)
+            (magpi--fast-forward-destination work branch target-ref)
+            (unless (magpi-intention--integrated-p work branch target-ref)
+              (magpi-intention-blocked
+               'log work "Merge did not integrate the intention branch" range))
+            (magpi--record-merged intention))
+           (t
+            (magpi-intention-blocked
+             'log work
+             (format "Merging into %s needs a merge commit"
+                     (magpi-intention--short-ref target-ref))
+             range))))
+      (error
+       (magpi--intentions-for-root source)
+       (magpi--paint-glance)
+       (magpi--land-blocked err (or target work source))
+       (signal (car err) (cdr err))))))
+
 (defun magpi--react-merge (&optional section)
-  "Merge SECTION's intention, then land in Magit. Failure also lands in Magit."
-  (let* ((intention (or (magpi--react-intention section)
-                        (user-error "This item has no managed intention")))
-         (source (magpi-intention-source-root intention)))
-    (when (yes-or-no-p (format "Merge %s into %s? "
-                               (magpi-intention-objective intention)
-                               (magpi-intention-base-ref intention)))
-      (condition-case err
-          (progn
-            (magpi-intention-merge (magpi-intention-id intention))
-            (magpi--schedule-refresh)
-            (magpi--land-magit source))
-        (error
-         (magpi--intentions-for-root source)
-         (magpi--schedule-refresh)
-         (magpi--land-magit source)
-         (signal (car err) (cdr err)))))))
+  "Merge SECTION's intention into target-ref, or Magit at the problem."
+  (magpi--merge
+   (or (magpi--react-intention section)
+       (user-error "This item has no managed intention"))))
+
+(defun magpi--react-open-merge (&optional section)
+  "Open Magit merge for SECTION's intention. Never records Magpi merged."
+  (magpi--open-merge
+   (or (magpi--react-intention section)
+       (user-error "This item has no managed intention"))))
 
 (defun magpi-discard--git-scope-p ()
   "Return non-nil when Magit would discard a Git hunk, file, or list."
@@ -883,16 +1140,13 @@ This is a snapshot pull, not part of event-driven paint."
 (defun magpi-discard-scope (&optional section)
   "Return discard depth at SECTION, innermost first.
 
-Like `magit-diff-scope': chat is a hunk, action a file, intention a
-list, worktree the Magit checkout Magpi owns.  `ask' means React, not
+Like `magit-diff-scope': chat ⊂ action ⊂ intention.  Worktree is the
+Magit checkout Magpi owns when Git has no hunk.  `ask' means React, not
 discard.  Nil means nothing Magpi should discard."
   (cond
    ((magpi--section-ask-id section) 'ask)
    ((and (derived-mode-p 'pimacs-chat-mode)
          (not (derived-mode-p 'magpi-status-mode)))
-    'chat)
-   ((and (magpi--section-action-id section)
-         (not (magpi--section-intention-id section)))
     'chat)
    ((magpi--section-action-id section) 'action)
    ((magpi--section-intention-id section) 'intention)
@@ -900,17 +1154,19 @@ discard.  Nil means nothing Magpi should discard."
          (not (magpi-discard--git-scope-p)))
     'worktree)))
 
+(defun magpi-discard--chat-buffer (handle)
+  "Return HANDLE's Pimacs chat buffer, or nil."
+  (and handle
+       (fboundp 'magpi-pimacs-handle-chat-buffer)
+       (ignore-errors (magpi-pimacs-handle-chat-buffer handle))))
+
 (defun magpi-discard--chat-action-id (&optional buffer)
   "Return the Magpi action id whose handle owns BUFFER, or nil."
   (setq buffer (or buffer (current-buffer)))
   (catch 'found
     (maphash
      (lambda (id handle)
-       (when (and handle
-                  (fboundp 'magpi-pimacs-handle-chat-buffer)
-                  (eq (ignore-errors
-                        (magpi-pimacs-handle-chat-buffer handle))
-                      buffer))
+       (when (eq (magpi-discard--chat-buffer handle) buffer)
          (throw 'found id)))
      magpi--handles)
     nil))
@@ -938,16 +1194,66 @@ discard.  Nil means nothing Magpi should discard."
 (defun magpi-discard--drop-theatre (action-id)
   "Terminate ACTION-ID's agent and drop theatre.  Kernel remains.
 
-Does not invent disconnect: the operator discarded this doing's chat."
+Does not invent disconnect: the operator discarded this doing's chat.
+Revoke first so a saved callback cannot restore Observation."
+  (magpi--revoke-listeners action-id)
   (when-let ((handle (gethash action-id magpi--handles)))
-    (let ((chat (and (fboundp 'magpi-pimacs-handle-chat-buffer)
-                     (ignore-errors (magpi-pimacs-handle-chat-buffer handle)))))
+    (let ((chat (magpi-discard--chat-buffer handle)))
       (magpi-backend-terminate magpi-backend handle)
       (when (and (bufferp chat) (buffer-live-p chat))
         (kill-buffer chat)))
     (remhash action-id magpi--handles))
   (when-let ((action (gethash action-id magpi--actions)))
     (puthash action-id (magpi-discard--kernel action) magpi--actions)))
+
+(defun magpi-discard--put-intention (intention)
+  (puthash (magpi-intention-id intention) intention magpi--intentions)
+  intention)
+
+(defun magpi-discard--owner (action-id)
+  "Return ACTION-ID's intention when this doing belongs to one."
+  (when-let* ((action (or (gethash action-id magpi--actions)
+                          (ignore-errors (magpi--action action-id))))
+              (intention-id (magpi-action-intention-id action)))
+    (ignore-errors (magpi--intention intention-id))))
+
+(defun magpi-discard--holds-writer-p (action-id &optional intention)
+  (when-let ((intention (or intention (magpi-discard--owner action-id))))
+    (equal action-id (plist-get (magpi-intention-writer-lease intention)
+                                :action-id))))
+
+(defun magpi-discard--release-writer (action-id &optional intention)
+  "Release ACTION-ID's writer when it holds the lease.  Return the intention."
+  (let ((intention (or intention (magpi-discard--owner action-id))))
+    (when (magpi-discard--holds-writer-p action-id intention)
+      (magpi-discard--put-intention
+       (magpi-intention-release-writer intention action-id "discard")))))
+
+(defun magpi-discard--drop-action (action-id)
+  "Chat, then this doing's writer if it holds the lease."
+  (magpi-discard--drop-theatre action-id)
+  (magpi-discard--release-writer action-id))
+
+(defun magpi-discard--drop-change (intention)
+  "Nested doings, then the checkout.  Active becomes discarded."
+  (dolist (action (magpi-discard--child-actions (magpi-intention-id intention)))
+    (magpi-discard--drop-action (magpi-action-id action)))
+  (setq intention (or (gethash (magpi-intention-id intention) magpi--intentions)
+                      intention))
+  (when-let ((lease (magpi-intention-writer-lease intention)))
+    (setq intention
+          (or (magpi-discard--release-writer
+               (plist-get lease :action-id) intention)
+              intention)))
+  (magpi-discard--put-intention
+   (pcase (magpi-intention-state intention)
+     ('active (magpi-intention-discard-record intention))
+     ((or 'merged 'discarded) (magpi-intention-remove-worktree intention))
+     (state (user-error "Cannot discard %s intention" state)))))
+
+(defun magpi-discard--done (text)
+  (magpi--paint-glance)
+  (message "%s" text))
 
 (defun magpi-discard--chat (action-id)
   "Discard ACTION-ID's chat (hunk depth).  Does not release a writer."
@@ -956,69 +1262,47 @@ Does not invent disconnect: the operator discarded this doing's chat."
   (when (yes-or-no-p
          (format "Discard chat for %s? This terminates the agent. " action-id))
     (magpi-discard--drop-theatre action-id)
-    (magpi--schedule-refresh)
-    (message "Discarded chat %s" action-id)))
+    (magpi-discard--done (format "Discarded chat %s" action-id))))
 
 (defun magpi-discard--action (action-id)
   "Discard ACTION-ID (file depth): chat, then writer lease if this doing holds it."
-  (let* ((action (magpi--action action-id))
-         (intention-id (magpi-action-intention-id action))
-         (intention (and intention-id (ignore-errors (magpi--intention intention-id))))
-         (lease (and intention (magpi-intention-writer-lease intention)))
-         (holds (equal action-id (plist-get lease :action-id))))
+  (magpi--action action-id)
+  (let ((holds (magpi-discard--holds-writer-p action-id)))
     (when (yes-or-no-p
            (format "Discard action %s? This terminates the agent%s. "
                    action-id
                    (if holds " and releases the writer" "")))
-      (magpi-discard--drop-theatre action-id)
-      (when (and intention holds)
-        (setq intention
-              (magpi-intention-release-writer intention action-id "discard"))
-        (puthash intention-id intention magpi--intentions))
-      (magpi--schedule-refresh)
-      (message "Discarded action %s" action-id))))
+      (magpi-discard--drop-action action-id)
+      (magpi-discard--done (format "Discarded action %s" action-id)))))
+
+(defun magpi-discard--change-prompt (intention leftover)
+  (let* ((checkout (plist-get (magpi-intention-git-facts intention) :checkout))
+         (n (length (magpi-discard--child-actions (magpi-intention-id intention))))
+         (nested (if (zerop n)
+                     "This force-removes it. "
+                   (format "This terminates %d action%s and force-removes it. "
+                           n (if (= n 1) "" "s")))))
+    (if leftover
+        (format "Remove leftover worktree for %s? %s"
+                (magpi-intention-objective intention) nested)
+      (format "Discard %s worktree for %s? %s"
+              (or checkout "managed")
+              (magpi-intention-objective intention)
+              nested))))
 
 (defun magpi-discard--intention (intention)
   "Discard INTENTION (list depth): nested chats/actions, then worktree."
   (let* ((intention (or intention
                         (user-error "This item has no managed intention")))
-         (actions (magpi-discard--child-actions (magpi-intention-id intention)))
-         (checkout (plist-get (magpi-intention-git-facts intention) :checkout))
-         (n (length actions))
-         (extra (if (zerop n)
-                    "This force-removes it. "
-                  (format "This terminates %d action%s and force-removes it. "
-                          n (if (= n 1) "" "s")))))
-    (when (yes-or-no-p
-           (format "Discard %s worktree for %s? %s"
-                   (or checkout "managed")
-                   (magpi-intention-objective intention)
-                   extra))
-      (dolist (action actions)
-        (magpi-discard--drop-theatre (magpi-action-id action)))
-      (when-let ((lease (magpi-intention-writer-lease intention)))
-        (setq intention
-              (magpi-intention-release-writer
-               intention (plist-get lease :action-id) "discard"))
-        (puthash (magpi-intention-id intention) intention magpi--intentions))
-      (setq intention (magpi-intention-discard-record intention))
-      (puthash (magpi-intention-id intention) intention magpi--intentions)
-      (magpi--schedule-refresh)
-      (message "Discarded intention %s" (magpi-intention-id intention)))))
-
-(defun magpi-discard--worktree (intention)
-  "Discard the Magpi checkout (Magit depth above hunk).  Active means intention."
-  (pcase (magpi-intention-state intention)
-    ('active (magpi-discard--intention intention))
-    ((or 'merged 'discarded)
-     (when (yes-or-no-p
-            (format "Remove leftover worktree for %s? This force-removes it. "
-                    (magpi-intention-objective intention)))
-       (setq intention (magpi-intention-remove-worktree intention))
-       (puthash (magpi-intention-id intention) intention magpi--intentions)
-       (magpi--schedule-refresh)))
-    (_ (user-error "Cannot discard %s intention"
-                   (magpi-intention-state intention)))))
+         (leftover (memq (magpi-intention-state intention)
+                         '(merged discarded))))
+    (when (yes-or-no-p (magpi-discard--change-prompt intention leftover))
+      (setq intention (magpi-discard--drop-change intention))
+      (magpi-discard--done
+       (format (if leftover
+                   "Removed leftover worktree for %s"
+                 "Discarded intention %s")
+               (magpi-intention-id intention))))))
 
 (defun magpi-discard--apply (&optional section)
   "Apply Magpi discard at SECTION's resolved depth."
@@ -1035,7 +1319,7 @@ Does not invent disconnect: the operator discarded this doing's chat."
      (let ((id (plist-get magpi-intention-metadata :intention-id)))
        (unless id
          (user-error "No Magpi worktree at point"))
-       (magpi-discard--worktree (magpi--intention id))))
+       (magpi-discard--intention (magpi--intention id))))
     (_ (user-error "No Magpi discard at point"))))
 
 (defun magpi-discard--magit-maybe ()
@@ -1045,8 +1329,7 @@ Does not invent disconnect: the operator discarded this doing's chat."
     (magpi-discard--apply nil)
     t))
 
-(with-eval-after-load 'magit
-  (advice-add 'magit-discard :before-until #'magpi-discard--magit-maybe))
+(advice-add 'magit-discard :before-until #'magpi-discard--magit-maybe)
 
 ;;;###autoload
 (defun magpi-discard (&optional section)
@@ -1134,7 +1417,7 @@ Deep: nested chats and actions terminate first."
        ((and intention (magpi-intention-writer-lease intention))
         '(("Release writer" . release)))
        ((and intention (eq (magpi-intention-state intention) 'active))
-        '(("Merge" . merge) ("Discard" . discard)))
+        '(("Merge" . merge) ("Open merge…" . open-merge) ("Discard" . discard)))
        (t nil))))
    (t nil)))
 
@@ -1145,7 +1428,7 @@ Deep: nested chats and actions terminate first."
 Binary, at point, Magit-short.  Not chat-as-UI.  Offers depend on lineage:
   Pi-ask → approve / reject
   intention + writer → release (honest recovery)
-  intention quiescent → merge / discard
+  intention quiescent → merge / open merge / discard
   action disconnected → show uncertainty (no fake completion)"
   (interactive)
   (setq section (or section (and (fboundp 'magit-current-section)
@@ -1187,6 +1470,7 @@ Binary, at point, Magit-short.  Not chat-as-UI.  Offers depend on lineage:
     ((or 'approved 'rejected) (magpi--react-answer choice section))
     ('release (magpi--react-release section))
     ('merge (magpi--react-merge section))
+    ('open-merge (magpi--react-open-merge section))
     ('discard (magpi--react-discard section))
     ('uncertainty
      (message "Action %s is disconnected — ownership uncertain; do not fake completion"
@@ -1278,15 +1562,186 @@ Intention opens Magit changes.  Root visits the adapter chat."
     (user-error "Nothing to visit at point"))))
 
 ;;;###autoload
+(defun magpi-visit-worktree (&optional section)
+  "Jump between the intention branch and its original checkout.
+
+Query the visit fact, then run or fail.  A live writer only opens the
+garden tree.  After the writer stops, exclusive lease occupies source
+with `magpi/<id>` so Doom sees the same path; press again to restore.
+Without the lease, visit the linked worktree directory.  Magit remains RET / m."
+  (interactive)
+  (magpi--visit-worktree-apply (magpi--visit-worktree-query section)))
+
+(defun magpi--visit-worktree-query (&optional section)
+  "Return a visit fact plist.  Never mutates Git or the registry.
+
+`:action' is `open-worktree', `open-source', `occupy', `restore', or
+`blocked'.  A live writer never occupies; visit the garden instead."
+  (let* ((id (or (magpi--section-intention-id section)
+                 (magpi--intention-id-holding-checkout default-directory)))
+         (intention (and id (ignore-errors (magpi--intention id))))
+         (source (and intention (magpi-intention-source-root intention)))
+         (source (and source (file-name-as-directory (file-truename source))))
+         (work (and intention (magpi-intention-worktree-path intention)))
+         (branch (and intention (magpi-intention-branch intention)))
+         (target (and intention (magpi-intention-target-ref intention)))
+         (lease (and intention (magpi-intention-writer-lease intention)))
+         (head (and lease source
+                    (magpi-git--maybe source "symbolic-ref" "--quiet"
+                                      "--short" "HEAD")))
+         (dirty (and lease source (not (magpi--checkout-clean-p source))))
+         (live (and lease id (magpi--intention-live-agent-p id)))
+         (here default-directory)
+         (garden (and lease work (not (magpi--directory-in-p work source))))
+         (garden-dirty (and garden (not (magpi--checkout-clean-p work))))
+         (garden-here (and garden (magpi--directory-in-p here work)))
+         (prev (and (equal id (car-safe magpi--worktree-jump))
+                    (cdr magpi--worktree-jump)))
+         (holds (and head branch (magpi-intention--refs-same-p head branch)))
+         (on-target (or (null target)
+                        (and head (magpi-intention--refs-same-p head target))))
+         (state (list :id id :intention intention :source source :work work
+                      :branch branch :target target :head head)))
+    (cond
+     ((not id)
+      (append state '(:action blocked :error "Stand on an intention to visit its checkout")))
+     ((not intention)
+      (append state (list :action 'blocked :error (format "Unknown Magpi intention: %s" id))))
+     ((not source)
+      (append state '(:action blocked :error "This intention has no source checkout")))
+     ((not lease)
+      (if (or (magpi--directory-in-p here work) (eq prev 'work))
+          (append state '(:action open-source))
+        (append state '(:action open-worktree))))
+     ((null head)
+      (append state '(:action blocked :error "Detached HEAD cannot jump")))
+     (dirty
+      (append state '(:action blocked :error "Uncommitted change lives in the source checkout")))
+     (live
+      (if (or (magpi--directory-in-p here work) (eq prev 'work))
+          (append state '(:action open-source))
+        (append state '(:action open-worktree))))
+     (garden-here
+      (append state '(:action blocked :error "Intention worktree is in use; occupy cannot yield it")))
+     (garden-dirty
+      (append state '(:action blocked :error "Uncommitted change lives in the intention worktree")))
+     (holds
+      (if target
+          (append state '(:action restore))
+        (append state '(:action blocked :error "No original branch to return to"))))
+     ((not on-target)
+      (append state (list :action 'blocked
+                          :error (format "Source checkout is on %s, not %s" head target))))
+     (t (append state '(:action occupy))))))
+
+(defun magpi--visit-worktree-apply (state)
+  "Run STATE's visit action, or fail.  Query already decided."
+  (let ((intention (plist-get state :intention))
+        (source (plist-get state :source))
+        (id (plist-get state :id)))
+    (pcase (plist-get state :action)
+      ('blocked
+       (user-error "%s" (plist-get state :error)))
+      ('open-source
+       (setq magpi--worktree-jump (cons id 'source))
+       (dired source))
+      ('open-worktree
+       (setq intention (magpi-intention-ensure-worktree intention (magpi--root)))
+       (puthash id intention magpi--intentions)
+       (setq magpi--worktree-jump (cons id 'work))
+       (dired (file-name-as-directory
+               (file-truename
+                (or (magpi-intention-worktree-path intention)
+                    (user-error "This intention has no live checkout"))))))
+      ('occupy
+       (magpi--visit-worktree-claim intention source)
+       (setq magpi--worktree-jump (cons id 'work))
+       (magpi--paint-glance)
+       (dired source))
+      ('restore
+       (magpi--visit-worktree-release intention source)
+       (setq magpi--worktree-jump (cons id 'source))
+       (magpi--paint-glance)
+       (dired source))
+      (_ (user-error "Nothing to visit at point")))))
+
+(defun magpi--checkout-clean-p (directory)
+  "Return non-nil when DIRECTORY has no tracked uncommitted change.
+
+Untracked files are not uncommitted change."
+  (string-empty-p
+   (or (magpi-git--maybe directory "status" "--porcelain"
+                         "--untracked-files=no")
+       "")))
+
+(defun magpi--intention-live-agent-p (intention-id)
+  (seq-some (lambda (action)
+              (magpi--live-handle (magpi-action-id action)))
+            (magpi--actions-for-intention intention-id)))
+
+(defun magpi--visit-worktree-claim (intention source)
+  "Put SOURCE on the intention branch.  The garden worktree must yield."
+  (let ((id (magpi-intention-id intention))
+        (branch (magpi-intention-branch intention))
+        work)
+    (setq intention (magpi-intention-ensure-worktree intention source))
+    (puthash id intention magpi--intentions)
+    (setq work (magpi-intention-worktree-path intention))
+    (when (and work (not (magpi--directory-in-p work source)))
+      (magpi-git source "worktree" "remove" (directory-file-name work)))
+    (unless (magpi-intention--refs-same-p
+             (or (magpi-git--maybe source "symbolic-ref" "--quiet" "--short" "HEAD") "")
+             branch)
+      (magpi-git source "checkout" branch))))
+
+(defun magpi--visit-worktree-release (intention source)
+  "Restore SOURCE to target-ref and recreate the garden worktree."
+  (let ((id (magpi-intention-id intention))
+        (target (replace-regexp-in-string
+                 "\\`refs/heads/" ""
+                 (magpi-intention-target-ref intention))))
+    (magpi-git source "checkout" target)
+    (setq intention (magpi-intention-ensure-worktree intention source))
+    (puthash id intention magpi--intentions)))
+
+(defun magpi--directory-in-p (here root)
+  (when (and here root)
+    (let ((here (file-name-as-directory
+                 (if (file-directory-p here)
+                     (file-truename here)
+                   (expand-file-name here))))
+          (root (file-name-as-directory
+                 (if (file-directory-p root)
+                     (file-truename root)
+                   (expand-file-name root)))))
+      (string-prefix-p root here))))
+
+(defun magpi--intention-id-holding-checkout (directory)
+  "Return the intention whose live worktree holds DIRECTORY, or nil."
+  (when directory
+    (seq-some
+     (lambda (intention)
+       (and (magpi--directory-in-p directory
+                                   (magpi-intention-worktree-path intention))
+            (magpi-intention-id intention)))
+     (magpi--intentions-for-root (magpi--root)))))
+
+;;;###autoload
 (defun magpi-status (&optional root)
   "Open the Magit-backed Magpi status buffer for ROOT.
+
+A Magpi change worktree opens the repository's primary checkout, not a
+nested Magpi named by the uid.  Glance still lists only the invoking
+checkout's attached branch.
 
 Titles: query `magpi-backend-chat-candidates' once, pass one callback.
 `g' refreshes that snapshot then reconciles.  Event paint reuses it.
 Does not spawn, write the registry, or change auspice."
   (interactive)
-  (let* ((root (file-name-as-directory
+  (let* ((here (file-name-as-directory
                 (expand-file-name (or root (magpi--root)))))
+         (root (file-name-as-directory
+                (expand-file-name (magpi-intention-glance-root here))))
          (candidates (magpi-backend-chat-candidates magpi-backend root)))
     (magpi-status-open root
                        (lambda ()
@@ -1308,7 +1763,8 @@ Does not spawn, write the registry, or change auspice."
                        (lambda (action)
                          (when-let ((handle (gethash (magpi-action-id action)
                                                      magpi--handles)))
-                           (magpi-backend-history-pending magpi-backend handle))))
+                           (magpi-backend-history-pending magpi-backend handle)))
+                       here)
     (magpi--reconcile-actions-for-root root)
     (magpi-launch-refresh-catalog root)))
 

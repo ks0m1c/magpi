@@ -20,6 +20,9 @@
 (require 'magit-mode)
 (require 'pimacs)
 (require 'magpi)
+;; The plays exercise the glance against real Magit, so they opt in to
+;; status explicitly; orchestration never requires it eagerly.
+(require 'magpi-status)
 
 (defvar magpi-play--results nil)
 (defvar magpi-play--skip-pi nil)
@@ -97,6 +100,24 @@
         (dir (file-name-as-directory (expand-file-name dir))))
     (and file (string-prefix-p dir file))))
 
+(defun magpi-play--file-has (file needle)
+  (and (stringp file) (file-readable-p file)
+       (with-temp-buffer
+         (insert-file-contents file)
+         (goto-char (point-min))
+         (search-forward needle nil t))))
+
+(defun magpi-play--wait-marker (file marker seconds)
+  (magpi-play--wait (lambda () (magpi-play--file-has file marker)) seconds))
+
+(defun magpi-play--plant-marker (handle file marker)
+  (let ((chat (magpi-pimacs-handle-chat-buffer handle)))
+    (unless (buffer-live-p chat)
+      (error "no chat to plant marker"))
+    (with-current-buffer chat
+      (pimacs-send-prompt marker nil)))
+  (unless (magpi-play--wait-marker file marker 6)
+    (error "marker never landed in %s" file)))
 (defun magpi-play--stderr ()
   (if (get-buffer "*pimacs-stderr*")
       (with-current-buffer "*pimacs-stderr*" (buffer-string))
@@ -182,6 +203,35 @@
       (when (not (file-directory-p path))
         (error "worktree vanished despite forced remove fail")))))
 
+(defun magpi-play-B5-git-delete-leaves-records ()
+  "Magit-style worktree delete leaves Magpi intention and Action files."
+  (magpi-test-with-repo (root "magpi-life-B5-")
+    (magpi-play--reset)
+    (let ((default-directory root)
+          (magpi-backend (make-magpi-play-backend))
+          intention path)
+      (setq intention (magpi-intention-create-record "Delete leftover" root "delb5"))
+      (puthash "delb5" intention magpi--intentions)
+      (cl-letf (((symbol-function 'magpi-store-new-id) (lambda () "b5aaaaaaaaaa")))
+        (magpi-spawn-from-options
+         '(:intention-id "delb5" :role writer :context-kind none)))
+      (setq intention (magpi-intention-load root "delb5")
+            path (magpi-intention-worktree-path intention))
+      (unless (and path (file-directory-p path))
+        (error "B5 birth grew no worktree"))
+      (unless (file-exists-p (magpi-store-file root 'actions "b5aaaaaaaaaa"))
+        (error "B5 action file missing before delete"))
+      (magpi-test-repo-git root "worktree" "remove" "--force" path)
+      (setq intention (magpi-intention-load root "delb5"))
+      (unless (eq (magpi-intention-state intention) 'active)
+        (error "B5 state is %S after git delete" (magpi-intention-state intention)))
+      (when (magpi-intention-worktree-path intention)
+        (error "B5 Git still lists a checkout"))
+      (unless (file-exists-p (magpi-store-file root 'actions "b5aaaaaaaaaa"))
+        (error "B5 action file vanished"))
+      (unless (seq-find #'magpi-intention-active-p (magpi--intentions-for-root root))
+        (error "B5 glance dropped the live intention")))))
+
 (defun magpi-play-C1-persist-before-spawn ()
   (magpi-test-with-repo (root "magpi-life-C1-")
     (magpi-play--reset)
@@ -221,12 +271,11 @@
         (error "glance painted observation"))
       (unless (equal (magpi-action-chat-ref action) "c2aaaaaaaaaa")
         (error "chat-ref became %S" (magpi-action-chat-ref action)))
-      (let ((suffix (magpi-status--heading-suffix action))
-            (cold (magpi-status--auspice-motion 'cold)))
-        (unless (equal suffix cold)
-          (error "glance suffix %S is not cold" suffix))
-        (when (string-match-p "starting" suffix)
-          (error "glance painted starting"))))))
+      (let ((view (magpi-status--action-heading-view action (magpi-status--now))))
+        (unless (eq (magpi-status-heading-view-motion view) 'cold)
+          (error "glance motion %S is not cold" (magpi-status-heading-view-motion view)))
+        (when (eq (magpi-status-heading-view-motion view) 'lift)
+          (error "glance painted lift"))))))
 
 (defun magpi-play-C3-standalone-watermark ()
   (magpi-test-with-repo (root "magpi-life-C3-")
@@ -245,14 +294,15 @@
                  (lambda (dir) (setq opened dir)))
                 ((symbol-function 'magit-diff-range)
                  (lambda (range _) (setq ranged range))))
-        (magpi--standalone-changes 'status '(:action-id "c3aaaaaaaaaa"))
-        (magpi--standalone-changes 'diff '(:action-id "c3aaaaaaaaaa")))
+        ;; The door takes the action id the section selector would yield.
+        (magpi--standalone-changes 'status "c3aaaaaaaaaa")
+        (magpi--standalone-changes 'diff "c3aaaaaaaaaa"))
       (unless (file-equal-p opened root)
         (error "m did not open source-root"))
       (unless (equal ranged (format "%s..HEAD" head))
         (error "d range %S" ranged))
       (condition-case nil
-          (progn (magpi--standalone-changes 'commit '(:action-id "c3aaaaaaaaaa"))
+          (progn (magpi--standalone-changes 'commit "c3aaaaaaaaaa")
                  (error "commit should refuse"))
         (error nil)))))
 
@@ -541,14 +591,13 @@ Stand-in for Emacs death.  Proves older Action hooks the old chat via
              (unless (eq (magpi-observation-auspice
                           (magpi-action-observation loaded))
                          'cold)
-               (error "D6 glance not cold: %S / %s"
+               (error "D6 glance not cold: %S"
                       (magpi-observation-auspice
-                       (magpi-action-observation loaded))
-                      (magpi-status--heading-suffix loaded)))
-             (when (string-match-p "starting"
-                                   (magpi-status--heading-suffix loaded))
-               (error "D6 glance painted starting: %s"
-                      (magpi-status--heading-suffix loaded)))
+                       (magpi-action-observation loaded))))
+             (when (eq (magpi-status-heading-view-motion
+                        (magpi-status--action-heading-view loaded nil))
+                       'lift)
+               (error "D6 glance painted lift"))
              ;; RET on cold Action must respawn with same --session-id, no initial.
              (cl-letf (((symbol-function 'pimacs-chat)
                         (let ((orig (symbol-function 'pimacs-chat)))
@@ -590,6 +639,151 @@ Stand-in for Emacs death.  Proves older Action hooks the old chat via
         (when (file-directory-p root)
           (delete-directory root t))))))
 
+
+(cl-defun magpi-play-D7-discard-leaves-session ()
+  "Action `k' kills the agent; the Pi session and Action kernel remain."
+  (unless (magpi-play--pi-ready-p)
+    (magpi-play--record 'D7 'skip "no pi/pimacs")
+    (cl-return-from magpi-play-D7-discard-leaves-session nil))
+  (let* ((root (magpi-test-repo-create "magpi-life-D7-"))
+         (sess (expand-file-name "sessions" root))
+         (id "magpi-life-eeeeeeee")
+         (marker "magpi-life-discard-marker")
+         ok)
+    (unwind-protect
+        (magpi-play--with-pi
+         root sess
+         (lambda ()
+           (let* ((born (magpi-play--spawn-action root id))
+                  (handle (plist-get born :handle))
+                  state file resume-flags)
+             (unless (magpi-play--wait
+                      (lambda () (magpi-backend-live-p magpi-backend handle))
+                      8)
+               (error "D7 birth not live"))
+             (setq state (magpi-play--get-state handle)
+                   file (plist-get state :sessionFile))
+             (unless (equal (plist-get state :sessionId) id)
+               (error "D7 sessionId %S" (plist-get state :sessionId)))
+             (unless (magpi-play--file-under-p file sess)
+               (error "D7 sessionFile %S not under %s" file sess))
+             (magpi-play--plant-marker handle file marker)
+             (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_p) t))
+                       ((symbol-function 'magpi--paint-glance) #'ignore))
+               (magpi-discard--action id))
+             (when (gethash id magpi--handles)
+               (error "D7 handle survived discard"))
+             (when (magpi-action-observation (gethash id magpi--actions))
+               (error "D7 theatre survived"))
+             (unless (file-exists-p (magpi-store-file root 'actions id))
+               (error "D7 action file vanished"))
+             (unless (magpi-play--file-has file marker)
+               (error "D7 session marker gone from %s" file))
+             (unless (seq-find (lambda (a) (equal (magpi-action-id a) id))
+                               (magpi--actions-for-root root))
+               (error "D7 glance dropped the action"))
+             (cl-letf (((symbol-function 'pimacs-chat)
+                        (let ((orig (symbol-function 'pimacs-chat)))
+                          (lambda (&rest args)
+                            (setq resume-flags (copy-sequence pimacs-flags))
+                            (apply orig args)))))
+               (magpi--visit-or-open-action id))
+             (setq handle (gethash id magpi--handles))
+             (unless handle
+               (error "D7 RET produced no handle"))
+             (unless (equal (magpi-play--session-id-flags resume-flags) (list id))
+               (error "D7 RET flags --session-id %S" resume-flags))
+             (unless (magpi-play--wait
+                      (lambda () (magpi-backend-live-p magpi-backend handle))
+                      8)
+               (error "D7 RET not live"))
+             (setq state (magpi-play--get-state handle))
+             (unless (equal (plist-get state :sessionId) id)
+               (error "D7 RET sessionId %S" (plist-get state :sessionId)))
+             (let ((again (plist-get state :sessionFile)))
+               (unless (equal (file-truename again) (file-truename file))
+                 (error "D7 RET switched session file %S → %S" file again))
+               (unless (magpi-play--file-has again marker)
+                 (error "D7 old chat missing after RET"))))
+           (setq ok t)))
+      (unless ok
+        (message "Magpi play evidence retained: %s" root)
+        (message "sessions: %s" (magpi-play--jsonl sess))
+        (message "stderr: %s" (magpi-play--stderr)))
+      (when ok
+        (magpi-play--kill-agents)
+        (when (file-directory-p root)
+          (delete-directory root t))))))
+
+(cl-defun magpi-play-D8-intention-discard-leaves-session ()
+  "Intention `k' removes the worktree; Action file and Pi session remain."
+  (unless (magpi-play--pi-ready-p)
+    (magpi-play--record 'D8 'skip "no pi/pimacs")
+    (cl-return-from magpi-play-D8-intention-discard-leaves-session nil))
+  (let* ((root (magpi-test-repo-create "magpi-life-D8-"))
+         (sess (expand-file-name "sessions" root))
+         (id "magpi-life-ffffffff")
+         (iid "intd8")
+         (marker "magpi-life-intention-discard-marker")
+         ok)
+    (unwind-protect
+        (magpi-play--with-pi
+         root sess
+         (lambda ()
+           (let* (intention path born handle state file)
+             (setq intention (magpi-intention-create-record "Throw session" root iid))
+             (puthash iid intention magpi--intentions)
+             (setq born (magpi-play--spawn-action root id iid)
+                   handle (plist-get born :handle)
+                   intention (magpi-intention-load root iid)
+                   path (magpi-intention-worktree-path intention))
+             (unless (and path (file-directory-p path))
+               (error "D8 birth grew no worktree"))
+             (unless (magpi-play--wait
+                      (lambda () (magpi-backend-live-p magpi-backend handle))
+                      8)
+               (error "D8 birth not live"))
+             (setq state (magpi-play--get-state handle)
+                   file (plist-get state :sessionFile))
+             (unless (equal (plist-get state :sessionId) id)
+               (error "D8 sessionId %S" (plist-get state :sessionId)))
+             (unless (magpi-play--file-under-p file sess)
+               (error "D8 sessionFile %S not under %s" file sess))
+             (magpi-play--plant-marker handle file marker)
+             (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_p) t))
+                       ((symbol-function 'magpi--paint-glance) #'ignore))
+               (magpi-discard--intention (magpi-intention-load root iid)))
+             (when (file-directory-p path)
+               (error "D8 worktree survived"))
+             (unless (eq (magpi-intention-state (magpi-intention-load root iid))
+                         'discarded)
+               (error "D8 state is %S" (magpi-intention-state
+                                         (magpi-intention-load root iid))))
+             (unless (file-exists-p (magpi-store-file root 'actions id))
+               (error "D8 action file vanished"))
+             (unless (magpi-play--file-has file marker)
+               (error "D8 session marker gone from %s" file))
+             (unless (seq-find (lambda (a) (equal (magpi-action-id a) id))
+                               (magpi--actions-for-root root))
+               (error "D8 glance dropped the action"))
+             (condition-case err
+                 (progn
+                   (magpi--visit-or-open-action id)
+                   (error "D8 RET should have refused a missing checkout"))
+               (user-error
+                (unless (string-match-p "no live intention checkout"
+                                        (error-message-string err))
+                  (error "D8 RET error %s" (error-message-string err))))))
+           (setq ok t)))
+      (unless ok
+        (message "Magpi play evidence retained: %s" root)
+        (message "sessions: %s" (magpi-play--jsonl sess))
+        (message "stderr: %s" (magpi-play--stderr)))
+      (when ok
+        (magpi-play--kill-agents)
+        (when (file-directory-p root)
+          (delete-directory root t))))))
+
 (defun magpi-life-play-run (&optional which)
   "Run life plays.  WHICH is git, pi, or all (default)."
   (setq magpi-play--results nil
@@ -598,6 +792,7 @@ Stand-in for Emacs death.  Proves older Action hooks the old chat via
   (magpi-play--reset)
   (when (memq which '(git all))
     (magpi-play 'B3-failed-remove (magpi-play-B3-failed-remove))
+    (magpi-play 'B5 (magpi-play-B5-git-delete-leaves-records))
     (magpi-play 'C1 (magpi-play-C1-persist-before-spawn))
     (magpi-play 'C2 (magpi-play-C2-hydrate-without-theatre))
     (magpi-play 'C3 (magpi-play-C3-standalone-watermark))
@@ -609,7 +804,9 @@ Stand-in for Emacs death.  Proves older Action hooks the old chat via
           (magpi-play-D-chain)
         (error (magpi-play--record 'D1-D3 'fail (error-message-string err))))
       (magpi-play 'D5 (magpi-play-D5-two-actions))
-      (magpi-play 'D6 (magpi-play-D6-hydrate-ret))))
+      (magpi-play 'D6 (magpi-play-D6-hydrate-ret))
+      (magpi-play 'D7 (magpi-play-D7-discard-leaves-session))
+      (magpi-play 'D8 (magpi-play-D8-intention-discard-leaves-session))))
   (let* ((fails (seq-filter (lambda (row) (eq (nth 1 row) 'fail))
                             magpi-play--results))
          (passes (seq-filter (lambda (row) (eq (nth 1 row) 'pass))

@@ -240,6 +240,57 @@
                  (magpi-action-observation asked-running))
                 'aloft))))
 
+(ert-deftest magpi-action-reduce-telemetry-does-not-birth-lift ()
+  "Promise: model-only telemetry on a cold Action is not starting/connected."
+  (let* ((action (make-magpi-action :id "cold" :chat-ref "cold"))
+         (modeled (magpi-action-reduce
+                   action '(:type model-observed :model "openai/gpt-4.1")))
+         (ignored (magpi-action-reduce
+                   action '(:type unicorn-observed :usage (:input 1)))))
+    (should-not (magpi-action-observation action))
+    (should (eq ignored action))
+    (should-not (magpi-action-observation ignored))
+    (let ((observation (magpi-action-observation modeled)))
+      (should (equal (magpi-observation-running-model observation)
+                     "openai/gpt-4.1"))
+      (should-not (magpi-observation-activity-state observation))
+      (should-not (magpi-observation-connection-state observation))
+      (should (eq (magpi-observation-auspice observation) 'cold)))))
+
+(ert-deftest magpi-action-reduce-reconnected-is-the-connection-fact ()
+  "Promise: disconnect plus running stays blood until reconnected."
+  (let* ((action (magpi-action-reduce (magpi-test-action) '(:type disconnected)))
+         (running (magpi-action-reduce
+                   action '(:type activity-started :activity "thinking")))
+         (live (magpi-action-reduce running '(:type reconnected)))
+         (cold (magpi-action-reduce
+                (make-magpi-action :id "cold" :chat-ref "cold")
+                '(:type reconnected))))
+    (should (eq (magpi-observation-auspice (magpi-action-observation running))
+                'blood))
+    (should (eq (magpi-observation-connection-state
+                 (magpi-action-observation running))
+                'disconnected))
+    (should (eq (magpi-observation-activity-state
+                 (magpi-action-observation running))
+                'running))
+    (should (eq (magpi-observation-connection-state
+                 (magpi-action-observation live))
+                'connected))
+    (should (eq (magpi-observation-activity-state
+                 (magpi-action-observation live))
+                'running))
+    (should (eq (magpi-observation-auspice (magpi-action-observation live))
+                'aloft))
+    (should (eq (magpi-observation-activity-state
+                 (magpi-action-observation cold))
+                'starting))
+    (should (eq (magpi-observation-connection-state
+                 (magpi-action-observation cold))
+                'connected))
+    (should (eq (magpi-observation-auspice (magpi-action-observation cold))
+                'lift))))
+
 (ert-deftest magpi-action-disk-omits-observation-and-keeps-chat-ref-monotonic ()
   "Promise: Action files store pointers, not theatre; chat-ref only advances."
   (magpi-test-with-repo (repository "magpi-action-persist-")

@@ -79,17 +79,38 @@
 
 (ert-deftest magpi-history-pending-paints-without-minting-observation ()
   (let* ((magpi--actions (make-hash-table :test #'equal))
+         (magpi--listener-epochs (make-hash-table :test #'equal))
          (magpi--refresh-timer nil)
          (action (make-magpi-action :id "cold-1" :chat-ref "cold-1")))
     (unwind-protect
         (progn
           (puthash "cold-1" action magpi--actions)
-          (magpi--handle-event "cold-1" '(:type history-pending))
+          (magpi--revoke-listeners "cold-1")
+          (funcall (magpi--listener "cold-1") '(:type history-pending))
           (should (eq (gethash "cold-1" magpi--actions) action))
           (should-not (magpi-action-observation action))
           (should (timerp magpi--refresh-timer)))
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer)))))
+
+(ert-deftest magpi-paint-glance-clock-follows-listener ()
+  "Promise: operator paint is now; adapter listeners coalesce."
+  (let (now magpi--refresh-timer magpi--coalesce-paint)
+    (cl-letf (((symbol-function 'magpi--refresh-visible-buffers)
+               (lambda () (setq now t))))
+      (magpi--paint-glance)
+      (should now)
+      (should-not magpi--refresh-timer)
+      (setq now nil)
+      (let ((magpi--coalesce-paint t))
+        (unwind-protect
+            (progn
+              (magpi--paint-glance)
+              (should (timerp magpi--refresh-timer))
+              (should-not now))
+          (when (timerp magpi--refresh-timer)
+            (cancel-timer magpi--refresh-timer)))))))
+
 (ert-deftest magpi-spawn-failure-preserves-attributable-action-and-handle ()
   (magpi-test-without-store
   (let* ((backend (make-magpi-test-backend :fail-initial t))
@@ -136,6 +157,40 @@
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer))))))
 
+(ert-deftest magpi-returned-handle-does-not-clear-spawn-failure-evidence ()
+  "Promise: problem and disconnect from this spawn survive a returned handle."
+  (magpi-test-without-store
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         action)
+    (unwind-protect
+        (cl-letf (((symbol-function 'magpi-backend-spawn)
+                   (lambda (_backend action listener)
+                     (setf (magpi-test-backend-action backend) action
+                           (magpi-test-backend-listener backend) listener
+                           (magpi-test-backend-spawn-count backend)
+                           (1+ (or (magpi-test-backend-spawn-count backend) 0)))
+                     (funcall listener
+                              '(:type problem-observed :problem "extension error"))
+                     (funcall listener '(:type disconnected))
+                     'test-handle)))
+          (setq action
+                (magpi-spawn-spec
+                 "spawn-blood" "Inspect this"
+                 (magpi-launch-build default-directory nil 'writer
+                                     '(:kind none))))
+          (let ((observation (magpi-action-observation action)))
+            (should (eq (gethash "spawn-blood" magpi--handles) 'test-handle))
+            (should (equal (magpi-observation-problem observation)
+                           "extension error"))
+            (should (eq (magpi-observation-connection-state observation)
+                        'disconnected))
+            (should (eq (magpi-observation-auspice observation) 'blood))))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer))))))
 (ert-deftest magpi-spawn-from-options-freezes-model-and-thinking ()
   (let* ((backend (make-magpi-test-backend))
          (magpi-backend backend)
@@ -306,7 +361,7 @@ too for any direct calls."
   "Load glance paint helpers with the unit Magit shim when a test needs them.
 
 Orchestration no longer eagerly requires status; tests that call
-`magpi-status--heading*' must opt in explicitly."
+`magpi-status-view-slot' must opt in explicitly."
   (unless (boundp 'special-mode-map)
     (defvar special-mode-map (make-sparse-keymap)))
   (unless (require 'magit-mode nil t)
@@ -325,7 +380,8 @@ Orchestration no longer eagerly requires status; tests that call
     (defun magit-insert-heading (&rest arguments)
       (insert (mapconcat #'identity arguments "") "\n"))
     (provide 'magit-section))
-  (require 'magpi-status))
+  (require 'magpi-status)
+  (require 'magpi-status-hours))
 
 (ert-deftest magpi-root-visits-backend-root ()
   (let (visited)
@@ -401,6 +457,214 @@ Orchestration no longer eagerly requires status; tests that call
         (should (eq (car route) 'file))
         (should (string-suffix-p "lib/auth.ex" (cadr route)))))))
 
+(ert-deftest magpi-status-from-change-worktree-opens-primary ()
+  "Promise: Magpi opened in a change worktree is the repository Magpi."
+  (magpi-test-with-repo (repository "magpi-status-glance-root-")
+    (let* ((intention (magpi-intention-create-record "Why" repository "why"))
+           opened)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (cl-letf (((symbol-function 'magpi-status-open)
+                 (lambda (root &rest _) (setq opened root)))
+                ((symbol-function 'magpi-backend-chat-candidates)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'magpi--reconcile-actions-for-root)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'magpi-launch-refresh-catalog)
+                 (lambda (&rest _) nil)))
+        (let ((default-directory (magpi-intention-worktree-path intention)))
+          (magpi-status)
+          (should (file-equal-p opened repository)))))))
+
+(ert-deftest magpi-status-from-change-worktree-culls-to-that-branch ()
+  "Promise: glance opened in a change worktree keeps that change's branch."
+  (magpi-test-with-repo (repository "magpi-status-glance-origin-")
+    (let* ((intention (magpi-intention-create-record "Why" repository "why"))
+           opened origin)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (cl-letf (((symbol-function 'magpi-status-open)
+                 (lambda (root &rest rest)
+                   (setq opened root origin (nth 5 rest))))
+                ((symbol-function 'magpi-backend-chat-candidates)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'magpi--reconcile-actions-for-root)
+                 (lambda (&rest _) nil))
+                ((symbol-function 'magpi-launch-refresh-catalog)
+                 (lambda (&rest _) nil)))
+        (let ((default-directory (magpi-intention-worktree-path intention)))
+          (magpi-status)
+          (should (file-equal-p opened repository))
+          (should (file-equal-p origin default-directory)))))))
+
+(ert-deftest magpi-visit-worktree-opens-intention-checkout ()
+  "Promise: v lands in the linked worktree; v again returns to the source checkout."
+  (let (route
+        (magpi--worktree-jump nil)
+        (source (file-name-as-directory (file-truename "/tmp/project/")))
+        (work (file-name-as-directory (file-truename "/tmp/work/intent-1/"))))
+    (cl-letf (((symbol-function 'magpi--intention)
+               (lambda (id)
+                 (make-magpi-intention :id id :source-root "/tmp/project/")))
+              ((symbol-function 'magpi--root) (lambda () "/tmp/project/"))
+              ((symbol-function 'magpi-intention-ensure-worktree)
+               (lambda (intention &optional _invoking)
+                 (push 'ensure route)
+                 intention))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/intent-1/"))
+              ((symbol-function 'dired)
+               (lambda (dir) (push (list 'dired dir) route))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi-visit-worktree)
+        (should (equal route (list (list 'dired work) 'ensure)))
+        (setq route nil)
+        (magpi-visit-worktree)
+        (should (equal route (list (list 'dired source))))
+        (setq route nil)
+        (magpi-visit-worktree)
+        (should (equal (car route) (list 'dired work))))
+      (setq magpi--worktree-jump nil route nil)
+      (magpi-test-at-section (:intention "intent-1" :action "a1")
+        (magpi-visit-worktree)
+        (should (equal (car route) (list 'dired work))))
+      (magpi-test-at-section (:action "a1")
+        (should-error (magpi-visit-worktree)))
+      (setq magpi--worktree-jump nil route nil)
+      (let ((default-directory work))
+        (magpi-test-at-section (:intention "intent-1")
+          (magpi-visit-worktree)
+          (should (equal route (list (list 'dired source)))))))))
+
+(ert-deftest magpi-visit-worktree-writer-occupies-source-checkout ()
+  "Promise: exclusive writer v checks out magpi/<id> in source; v again restores."
+  (let* ((head "main")
+         (git nil)
+         (route nil)
+         (magpi--worktree-jump nil)
+         (magpi--refresh-timer nil)
+         (source (file-name-as-directory (file-truename "/tmp/project/")))
+         (intention (make-magpi-intention
+                     :id "intent-1"
+                     :source-root "/tmp/project/"
+                     :target-ref "main"
+                     :writer-lease '(:action-id "w1"))))
+    (cl-letf (((symbol-function 'magpi--intention) (lambda (_) intention))
+              ((symbol-function 'magpi-git--maybe)
+               (lambda (_dir &rest args)
+                 (pcase args
+                   (`("status" "--porcelain" . ,_) "")
+                   ('("symbolic-ref" "--quiet" "--short" "HEAD") head)
+                   (_ nil))))
+              ((symbol-function 'magpi-git)
+               (lambda (_dir &rest args)
+                 (push args git)
+                 (when (eq (car args) 'checkout))
+                 (when (and (stringp (car args)) (equal (car args) "checkout"))
+                   (setq head (cadr args)))
+                 ""))
+              ((symbol-function 'magpi-intention-ensure-worktree)
+               (lambda (next &optional _) next))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_) "/tmp/work/intent-1/"))
+              ((symbol-function 'magpi--intention-live-agent-p) (lambda (_) nil))
+              ((symbol-function 'dired) (lambda (dir) (push dir route))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi-visit-worktree)
+        (should (equal (car git) '("checkout" "magpi/intent-1")))
+        (should (equal (car route) source))
+        (should (equal head "magpi/intent-1"))
+        (magpi-visit-worktree)
+        (should (equal head "main"))
+        (should (equal (car route) source))))
+    (when (timerp magpi--refresh-timer)
+      (cancel-timer magpi--refresh-timer))))
+
+(ert-deftest magpi-visit-worktree-query-blocks-before-git ()
+  "Promise: visit query is a fact; blocked never checks out."
+  (let* ((git nil)
+         (intention (make-magpi-intention
+                     :id "intent-1"
+                     :source-root "/tmp/project/"
+                     :target-ref "main"
+                     :writer-lease '(:action-id "w1"))))
+    (cl-letf (((symbol-function 'magpi--intention) (lambda (_) intention))
+              ((symbol-function 'magpi-git--maybe)
+               (lambda (_dir &rest args)
+                 (pcase args
+                   (`("status" "--porcelain" . ,_) " M lisp.el")
+                   ('("symbolic-ref" "--quiet" "--short" "HEAD") "main")
+                   (_ nil))))
+              ((symbol-function 'magpi-git)
+               (lambda (&rest args) (push args git) ""))
+              ((symbol-function 'magpi--intention-live-agent-p) (lambda (_) nil)))
+      (magpi-test-at-section (:intention "intent-1")
+        (let ((state (magpi--visit-worktree-query)))
+          (should (eq (plist-get state :action) 'blocked))
+          (should (string-match-p "Uncommitted" (plist-get state :error))))
+        (should-error (magpi-visit-worktree))
+        (should-not git)))))
+
+(ert-deftest magpi-visit-worktree-lifecycle-waits-for-writer ()
+  "Promise: live writer visits the garden; occupy runs only after theatre drops."
+  (magpi-test-with-repo (repository "magpi-visit-v-life-")
+    (let* ((backend (make-magpi-test-backend))
+           (magpi-backend backend)
+           (magpi--actions (make-hash-table :test #'equal))
+           (magpi--handles (make-hash-table :test #'equal))
+           (magpi--listener-epochs (make-hash-table :test #'equal))
+           (magpi--intentions (make-hash-table :test #'equal))
+           (magpi--worktree-jump nil)
+           (magpi--refresh-timer nil)
+           (magpi-launch--catalog (make-hash-table :test #'equal))
+           (magpi-launch--last-model (make-hash-table :test #'equal))
+           (default-directory repository)
+           (dired-at nil)
+           (ids '("writer-1")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'dired)
+                     (lambda (dir) (setq dired-at dir)))
+                    ((symbol-function 'magpi--root) (lambda () repository))
+                    ((symbol-function 'magpi--capture-bind)
+                     (lambda (_kind) '(:kind none)))
+                    ((symbol-function 'magpi-store-new-id)
+                     (lambda () (pop ids))))
+            (magpi-intention-create-record "V flow" repository "lease")
+            (magpi-spawn-from-options
+             '(:intention-id "lease" :role writer :lease t :context-kind none))
+            (let* ((intention (magpi--intention "lease"))
+                   (work (magpi-intention-worktree-path intention))
+                   (branch (magpi-intention-branch intention))
+                   (head (lambda ()
+                           (magpi-git--maybe repository
+                                             "symbolic-ref" "--quiet"
+                                             "--short" "HEAD"))))
+              (should work)
+              (should (file-directory-p work))
+              (should (magpi--live-handle "writer-1"))
+              (magpi-test-at-section (:intention "lease")
+                (should (eq (plist-get (magpi--visit-worktree-query) :action)
+                            'open-worktree))
+                (magpi-visit-worktree)
+                (should (file-equal-p dired-at work))
+                (should (magpi-intention--refs-same-p (funcall head) "master"))
+                (should (file-directory-p work)))
+              (magpi-discard--drop-theatre "writer-1")
+              (should-not (magpi--live-handle "writer-1"))
+              (magpi-test-at-section (:intention "lease")
+                (should (eq (plist-get (magpi--visit-worktree-query) :action)
+                            'occupy))
+                (magpi-visit-worktree)
+                (should (magpi-intention--refs-same-p (funcall head) branch))
+                (should (file-equal-p dired-at repository))
+                (should-not (file-directory-p work))
+                (should (eq (plist-get (magpi--visit-worktree-query) :action)
+                            'restore))
+                (magpi-visit-worktree)
+                (should (magpi-intention--refs-same-p (funcall head) "master"))
+                (should (file-directory-p
+                         (magpi-intention-worktree-path
+                          (magpi--intention "lease")))))))
+        (when (timerp magpi--refresh-timer)
+          (cancel-timer magpi--refresh-timer))))))
 (ert-deftest magpi-contextual-react-choices-matrix ()
   (magpi-test-without-store
     (let* ((magpi--actions (make-hash-table :test #'equal))
@@ -458,7 +722,7 @@ Orchestration no longer eagerly requires status; tests that call
                          '(release))))
         (magpi-test-at-section (:intention "intent-2")
           (should (equal (mapcar #'cdr (magpi-react--choices))
-                         '(merge discard))))
+                         '(merge open-merge discard))))
         (should-not (magpi-react--choices))
         (should-error (magpi-react) :type 'user-error)))))
 
@@ -499,8 +763,8 @@ Orchestration no longer eagerly requires status; tests that call
            (magpi--intentions (make-hash-table :test #'equal))
            (intention (make-magpi-intention
                        :id "intent-1" :objective "Why" :state 'active
-                       :worktree-path "/tmp/work/" :source-root "/tmp/project/"
-                       :base-ref "main" :branch "magpi/why"))
+                       :source-root "/tmp/project/"
+                       :target-ref "main"))
            (alone (make-magpi-action :id "alone" :source-root "/tmp/project/"
                                      :spawn-oid "abc"))
            magit-root diff-range)
@@ -508,6 +772,8 @@ Orchestration no longer eagerly requires status; tests that call
       (puthash "alone" alone magpi--actions)
       (cl-letf (((symbol-function 'magpi--intention)
                  (lambda (id) (gethash id magpi--intentions)))
+                ((symbol-function 'magpi-intention-worktree-path)
+                 (lambda (_intention) "/tmp/work/"))
                 ((symbol-function 'magpi-intention-work-range)
                  (lambda (_intention) "main..magpi/why"))
                 ((symbol-function 'magit-status)
@@ -539,6 +805,7 @@ Orchestration no longer eagerly requires status; tests that call
   (should (eq (lookup-key magpi-command-map "@")
               #'magpi-bind))
   (should (eq (lookup-key magpi-command-map "k") #'magpi-discard))
+  (should (eq (lookup-key magpi-command-map "v") #'magpi-visit-worktree))
   ;; Extra I/R/M stay off the primary map.
   (dolist (key '("I" "R" "M"))
     (should-not (lookup-key magpi-command-map key)))
@@ -597,7 +864,7 @@ Orchestration no longer eagerly requires status; tests that call
 (ert-deftest magpi-writer-release-is-explicit-and-exact ()
   (let* ((intention (make-magpi-intention
                      :id "intent-1" :objective "Repair auth" :state 'active
-                     :worktree-path "/tmp/work/" :branch "magpi/auth" :base-ref "main"
+                     :target-ref "main"
                      :writer-lease '(:action-id "writer-1")))
          (magpi--intentions (make-hash-table :test #'equal))
          released)
@@ -607,7 +874,7 @@ Orchestration no longer eagerly requires status; tests that call
                (lambda (owner action-id reason)
                  (setq released (list owner action-id reason))
                  owner))
-              ((symbol-function 'magpi--schedule-refresh) #'ignore))
+              ((symbol-function 'magpi--paint-glance) #'ignore))
       (should-error
        (magpi-test-at-section (:action "reader-1" :intention "intent-1")
          (magpi--react-release)))
@@ -654,10 +921,11 @@ Orchestration no longer eagerly requires status; tests that call
     (unwind-protect
         (cl-letf (((symbol-function 'magpi--intention) (lambda (_id) intention))
                   ((symbol-function 'magpi-intention-ensure-worktree)
-                   (lambda (record)
+                   (lambda (record &optional _invoking)
                      (setq ensured t)
-                     (setf (magpi-intention-worktree-path record) "/tmp/project/work/")
                      record))
+                  ((symbol-function 'magpi-intention-worktree-path)
+                   (lambda (_intention) "/tmp/project/work/"))
                   ((symbol-function 'magpi-intention-add-action) #'ignore)
                   ((symbol-function 'magpi--capture-bind)
                    (lambda (_kind) '(:kind none)))
@@ -681,20 +949,165 @@ Orchestration no longer eagerly requires status; tests that call
     (setf (magpi-intention-writer-lease intention) nil)
     (magpi-test-at-section (:intention "intent-1")
       (should (equal (mapcar #'cdr (magpi-react--choices))
-                     '(merge discard))))))
+                     '(merge open-merge discard))))))
 
-(ert-deftest magpi-react-merge-lands-in-magit-on-failure ()
+(ert-deftest magpi-react-open-merge-queries-destination-when-vacant ()
+  "Promise: vacant checkout of target-ref opens Magit log of that branch."
   (let* ((intention (make-magpi-intention
                      :id "intent-1" :objective "Repair auth" :state 'active
-                     :source-root "/tmp/project/" :base-ref "main"))
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         surface directory subject)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-git)
+               (lambda (_dir &rest args)
+                 (if (equal (car args) "status") "" "abc")))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) nil))
+              ((symbol-function 'magpi-intention--integrated-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'magpi--land)
+               (lambda (surf dir &optional subj)
+                 (setq surface surf directory dir subject subj))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-open-merge))
+      (should (eq surface 'log))
+      (should (equal directory "/tmp/work/"))
+      (should (equal subject "main..magpi/intent-1"))
+      (should (eq (magpi-intention-state intention) 'active)))))
+
+(ert-deftest magpi-react-open-merge-lands-on-dirty-worktree ()
+  "Promise: dirty worktree opens Magit there, not the source checkout."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
          (magpi--intentions (make-hash-table :test #'equal))
          landed)
     (puthash "intent-1" intention magpi--intentions)
-    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
-              ((symbol-function 'magpi-intention-merge)
-               (lambda (_id) (user-error "Git merge conflict")))
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-git)
+               (lambda (dir &rest args)
+                 (if (and (equal dir "/tmp/work/")
+                          (equal (seq-take args 2) '("status" "--porcelain")))
+                     " M file"
+                   "")))
               ((symbol-function 'magpi--intentions-for-root) #'ignore)
-              ((symbol-function 'magpi--schedule-refresh) #'ignore)
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--land-magit)
+               (lambda (directory) (setq landed directory))))
+      (should-error
+       (magpi-test-at-section (:intention "intent-1")
+         (magpi--react-open-merge)))
+      (should (equal landed "/tmp/work/")))))
+
+(ert-deftest magpi-react-open-merge-opens-magit-merge-not-status ()
+  "Promise: ready to integrate opens Magit merge on the target checkout."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         surface directory subject)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-git) (lambda (&rest _) ""))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) '(:path "/tmp/project/" :head "abc")))
+              ((symbol-function 'magpi-intention--merge-in-progress-p)
+               (lambda (_) nil))
+              ((symbol-function 'magpi-intention--integrated-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'magpi--land)
+               (lambda (surf dir &optional subj)
+                 (setq surface surf directory dir subject subj))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-open-merge))
+      (should (eq surface 'merge))
+      (should (equal directory "/tmp/project/"))
+      (should (equal subject "magpi/intent-1"))
+      (should (eq (magpi-intention-state intention) 'active)))))
+
+(ert-deftest magpi-react-open-merge-does-not-record-when-git-shows-it ()
+  "Promise: already-integrated Git does not dispose the why; Merge does."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         landed)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-git) (lambda (&rest _) ""))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) '(:path "/tmp/project/" :head "abc")))
+              ((symbol-function 'magpi-intention--merge-in-progress-p)
+               (lambda (_) nil))
+              ((symbol-function 'magpi-intention--integrated-p)
+               (lambda (&rest _) t))
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--land)
+               (lambda (&rest _) (setq landed t)))
+              ((symbol-function 'magpi--land-magit)
+               (lambda (directory) (setq landed directory))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-open-merge))
+      (should (eq (magpi-intention-state
+                   (gethash "intent-1" magpi--intentions))
+                  'active))
+      (should-not landed))))
+
+(ert-deftest magpi-react-merge-lands-on-dirty-worktree ()
+  "Promise: dirty change opens Magit status there, not the target checkout."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         landed)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-git)
+               (lambda (dir &rest args)
+                 (if (and (equal dir "/tmp/work/")
+                          (equal (seq-take args 2) '("status" "--porcelain")))
+                     " M file"
+                   "")))
+              ((symbol-function 'magpi--intentions-for-root) #'ignore)
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--land-magit)
+               (lambda (directory) (setq landed directory))))
+      (should-error
+       (magpi-test-at-section (:intention "intent-1")
+         (magpi--react-merge)))
+      (should (equal landed "/tmp/work/")))))
+
+(ert-deftest magpi-react-merge-lands-on-dirty-target ()
+  "Promise: dirty target checkout opens Magit status there."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         landed)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) '(:path "/tmp/project/" :head "abc")))
+              ((symbol-function 'magpi-intention--merge-in-progress-p)
+               (lambda (_) nil))
+              ((symbol-function 'magpi-git)
+               (lambda (dir &rest args)
+                 (if (and (equal dir "/tmp/project/")
+                          (equal (seq-take args 2) '("status" "--porcelain")))
+                     " M file"
+                   "")))
+              ((symbol-function 'magpi--intentions-for-root) #'ignore)
+              ((symbol-function 'magpi--paint-glance) #'ignore)
               ((symbol-function 'magpi--land-magit)
                (lambda (directory) (setq landed directory))))
       (should-error
@@ -702,10 +1115,237 @@ Orchestration no longer eagerly requires status; tests that call
          (magpi--react-merge)))
       (should (equal landed "/tmp/project/")))))
 
+(ert-deftest magpi-react-merge-lands-status-when-git-fails ()
+  "Promise: Git merge failure opens Magit status on the target checkout."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         landed)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) '(:path "/tmp/project/" :head "abc")))
+              ((symbol-function 'magpi-intention--merge-in-progress-p)
+               (lambda (_) nil))
+              ((symbol-function 'magpi-intention--integrated-p)
+               (lambda (&rest _) nil))
+              ((symbol-function 'magpi-git)
+               (lambda (_dir &rest args)
+                 (when (equal (car args) "merge")
+                   (user-error "Git CONFLICT (content)"))
+                 ""))
+              ((symbol-function 'magpi--intentions-for-root) #'ignore)
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--land-magit)
+               (lambda (directory) (setq landed directory))))
+      (should-error
+       (magpi-test-at-section (:intention "intent-1")
+         (magpi--react-merge)))
+      (should (equal landed "/tmp/project/"))
+      (should (eq (magpi-intention-state intention) 'active)))))
+
+(ert-deftest magpi-react-merge-follows-when-clean ()
+  "Promise: clean target receives git merge; Magpi records merged; no Magit lobby."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         merged-at landed)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) '(:path "/tmp/project/" :head "abc")))
+              ((symbol-function 'magpi-intention--merge-in-progress-p)
+               (lambda (_) nil))
+              ((symbol-function 'magpi-intention--integrated-p)
+               (lambda (&rest _) (and merged-at t)))
+              ((symbol-function 'magpi-git)
+               (lambda (dir &rest args)
+                 (when (equal args '("merge" "--no-edit" "magpi/intent-1"))
+                   (setq merged-at dir))
+                 ""))
+              ((symbol-function 'magpi-intention-set-state)
+               (lambda (record state &optional _reason)
+                 (setf (magpi-intention-state record) state)
+                 record))
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--land-magit)
+               (lambda (directory) (setq landed directory))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-merge))
+      (should (equal merged-at "/tmp/project/"))
+      (should (eq (magpi-intention-state
+                   (gethash "intent-1" magpi--intentions))
+                  'merged))
+      (should-not landed))))
+
+(ert-deftest magpi-react-merge-untracked-on-target-is-not-uncommitted ()
+  "Promise: untracked files on the target are not uncommitted change."
+  (let* ((intention (make-magpi-intention
+                     :id "intent-1" :objective "Repair auth" :state 'active
+                     :source-root "/tmp/project/" :target-ref "main"))
+         (magpi--intentions (make-hash-table :test #'equal))
+         merged-at landed)
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'file-directory-p) (lambda (_) t))
+              ((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi-intention--worktree-for-branch)
+               (lambda (&rest _) '(:path "/tmp/project/" :head "abc")))
+              ((symbol-function 'magpi-intention--merge-in-progress-p)
+               (lambda (_) nil))
+              ((symbol-function 'magpi-intention--integrated-p)
+               (lambda (&rest _) (and merged-at t)))
+              ((symbol-function 'magpi-git)
+               (lambda (dir &rest args)
+                 (cond
+                  ((equal args '("status" "--porcelain" "--untracked-files=no"))
+                   "")
+                  ((equal (seq-take args 2) '("status" "--porcelain"))
+                   (error "must not treat untracked as uncommitted"))
+                  ((equal args '("merge" "--no-edit" "magpi/intent-1"))
+                   (setq merged-at dir)
+                   "")
+                  (t ""))))
+              ((symbol-function 'magpi-intention-set-state)
+               (lambda (record state &optional _reason)
+                 (setf (magpi-intention-state record) state)
+                 record))
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--land-magit)
+               (lambda (directory) (setq landed directory))))
+      (magpi-test-at-section (:intention "intent-1")
+        (magpi--react-merge))
+      (should (equal merged-at "/tmp/project/"))
+      (should (eq (magpi-intention-state
+                   (gethash "intent-1" magpi--intentions))
+                  'merged))
+      (should-not landed))))
+
+(ert-deftest magpi-react-merge-follows-real-git-onto-target ()
+  "Promise: React merge fast-forwards the target checkout and records merged."
+  (magpi-test-with-repo (repository "magpi-react-merge-")
+    (let* ((intention (magpi-intention-create-record "Ship it" repository "ship"))
+           (magpi--intentions (make-hash-table :test #'equal))
+           work landed)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (setq work (magpi-intention-worktree-path intention))
+      (puthash "ship" intention magpi--intentions)
+      (with-temp-file (expand-file-name "done" work)
+        (insert "done\n"))
+      (magpi-test-repo-git work "add" "done")
+      (magpi-test-repo-git work "commit" "-m" "done")
+      (with-temp-file (expand-file-name "todo.org" repository)
+        (insert "scratch\n"))
+      (cl-letf (((symbol-function 'magpi--land-magit)
+                 (lambda (directory) (setq landed directory)))
+                ((symbol-function 'magpi--paint-glance) #'ignore))
+        (magpi--merge intention)
+        (should (eq (magpi-intention-state
+                     (gethash "ship" magpi--intentions))
+                    'merged))
+        (should-not landed)
+        (should (file-exists-p (expand-file-name "done" repository)))
+        (should (magpi-intention--integrated-p
+                 repository "magpi/ship"
+                 (magpi-intention-target-ref intention)))))))
+
+(ert-deftest magpi-react-merge-fast-forwards-vacant-destination ()
+  "Promise: no checkout of target-ref still fast-forwards that branch."
+  (magpi-test-with-repo (repository "magpi-react-merge-vacant-")
+    (let* ((intention (magpi-intention-create-record "Ship it" repository "ship"))
+           (magpi--intentions (make-hash-table :test #'equal))
+           work landed dest)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (setq work (magpi-intention-worktree-path intention))
+      (puthash "ship" intention magpi--intentions)
+      (with-temp-file (expand-file-name "done" work)
+        (insert "done\n"))
+      (magpi-test-repo-git work "add" "done")
+      (magpi-test-repo-git work "commit" "-m" "done")
+      (magpi-test-repo-git repository "checkout" "-b" "other")
+      (setq dest (magpi-intention-destination intention))
+      (should (plist-get dest :oid))
+      (should-not (plist-get dest :path))
+      (cl-letf (((symbol-function 'magpi--land)
+                 (lambda (&rest _) (setq landed t)))
+                ((symbol-function 'magpi--paint-glance) #'ignore))
+        (magpi--merge intention)
+        (should (eq (magpi-intention-state
+                     (gethash "ship" magpi--intentions))
+                    'merged))
+        (should-not landed)
+        (should (magpi-intention--integrated-p
+                 work "magpi/ship"
+                 (magpi-intention-target-ref intention)))
+        (should-not (magpi-intention--integrated-p
+                     work "magpi/ship" "refs/heads/other"))))))
+
+(ert-deftest magpi-react-open-merge-logs-vacant-destination ()
+  "Promise: open merge on a vacant target-ref queries Magit log, stays active."
+  (magpi-test-with-repo (repository "magpi-react-open-merge-vacant-")
+    (let* ((intention (magpi-intention-create-record "Ship it" repository "ship"))
+           (magpi--intentions (make-hash-table :test #'equal))
+           work surface directory subject)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (setq work (magpi-intention-worktree-path intention))
+      (puthash "ship" intention magpi--intentions)
+      (with-temp-file (expand-file-name "done" work)
+        (insert "done\n"))
+      (magpi-test-repo-git work "add" "done")
+      (magpi-test-repo-git work "commit" "-m" "done")
+      (magpi-test-repo-git repository "checkout" "-b" "other")
+      (cl-letf (((symbol-function 'magpi--land)
+                 (lambda (surf dir &optional subj)
+                   (setq surface surf directory dir subject subj)))
+                ((symbol-function 'magpi--paint-glance) #'ignore))
+        (magpi--open-merge intention)
+        (should (eq surface 'log))
+        (should (file-equal-p directory work))
+        (should (equal subject "master..magpi/ship"))
+        (should (eq (magpi-intention-state
+                     (gethash "ship" magpi--intentions))
+                    'active))))))
+
+(ert-deftest magpi-react-merge-vacant-non-ff-opens-destination-log ()
+  "Promise: a merge commit without a checkout of target-ref stays Magit log."
+  (magpi-test-with-repo (repository "magpi-react-merge-vacant-div-")
+    (let* ((intention (magpi-intention-create-record "Ship it" repository "ship"))
+           (magpi--intentions (make-hash-table :test #'equal))
+           work surface subject)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (setq work (magpi-intention-worktree-path intention))
+      (puthash "ship" intention magpi--intentions)
+      (with-temp-file (expand-file-name "done" work)
+        (insert "done\n"))
+      (magpi-test-repo-git work "add" "done")
+      (magpi-test-repo-git work "commit" "-m" "done")
+      (with-temp-file (expand-file-name "elsewhere" repository)
+        (insert "other\n"))
+      (magpi-test-repo-git repository "add" "elsewhere")
+      (magpi-test-repo-git repository "commit" "-m" "elsewhere")
+      (magpi-test-repo-git repository "checkout" "-b" "other")
+      (cl-letf (((symbol-function 'magpi--land)
+                 (lambda (surf _dir &optional subj)
+                   (setq surface surf subject subj)))
+                ((symbol-function 'magpi--paint-glance) #'ignore))
+        (should-error (magpi--merge intention) :type 'magpi-blocked)
+        (should (eq surface 'log))
+        (should (equal subject "master..magpi/ship"))
+        (should (eq (magpi-intention-state
+                     (gethash "ship" magpi--intentions))
+                    'active))
+        (should-not (magpi-intention--integrated-p
+                     work "magpi/ship"
+                     (magpi-intention-target-ref intention)))))))
 (ert-deftest magpi-react-discard-names-force ()
   (let* ((intention (make-magpi-intention
-                     :id "intent-1" :objective "Throw away" :state 'active
-                     :worktree-path "/tmp/work/"))
+                     :id "intent-1" :objective "Throw away" :state 'active))
          (magpi--intentions (make-hash-table :test #'equal))
          prompt discarded)
     (puthash "intent-1" intention magpi--intentions)
@@ -715,7 +1355,7 @@ Orchestration no longer eagerly requires status; tests that call
                (lambda (p) (setq prompt p) t))
               ((symbol-function 'magpi-intention-discard-record)
                (lambda (record) (setq discarded t) record))
-              ((symbol-function 'magpi--schedule-refresh) #'ignore))
+              ((symbol-function 'magpi--paint-glance) #'ignore))
       (magpi-test-at-section (:intention "intent-1")
         (magpi--react-discard))
       (should discarded)
@@ -725,13 +1365,17 @@ Orchestration no longer eagerly requires status; tests that call
 (ert-deftest magpi-discard-scope-is-contextual ()
   "Promise: discard depth is innermost, like Magit hunk vs file vs list."
   (magpi-test-at-section (:action "cold-1")
-    (should (eq (magpi-discard-scope) 'chat)))
+    (should (eq (magpi-discard-scope) 'action)))
   (magpi-test-at-section (:action "a1" :intention "intent-1")
     (should (eq (magpi-discard-scope) 'action)))
   (magpi-test-at-section (:intention "intent-1")
     (should (eq (magpi-discard-scope) 'intention)))
   (magpi-test-at-section (:action "a1" :ask "q1" :intention "intent-1")
     (should (eq (magpi-discard-scope) 'ask)))
+  (cl-letf (((symbol-function 'derived-mode-p)
+             (lambda (&rest modes) (memq 'pimacs-chat-mode modes))))
+    (magpi-test-at-section (:action "a1" :intention "intent-1")
+      (should (eq (magpi-discard-scope) 'chat))))
   (let ((magpi-intention-metadata '(:intention-id "intent-1")))
     (cl-letf (((symbol-function 'magpi-discard--git-scope-p) (lambda () nil)))
       (should (eq (magpi-discard-scope) 'worktree)))
@@ -751,25 +1395,53 @@ Orchestration no longer eagerly requires status; tests that call
          (magpi--intentions (make-hash-table :test #'equal))
          (intention (make-magpi-intention
                      :id "intent-1" :objective "Keep why" :state 'active
-                     :writer-lease '(:action-id "cold-1")))
+                     :writer-lease '(:action-id "writer-1")))
          (action (make-magpi-action
-                  :id "cold-1" :intention-id nil
+                  :id "writer-1" :intention-id "intent-1"
                   :observation (make-magpi-observation :activity-state 'running))))
     (puthash "intent-1" intention magpi--intentions)
-    (puthash "cold-1" action magpi--actions)
-    (puthash "cold-1" 'test-handle magpi--handles)
-    (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
-              ((symbol-function 'magpi--schedule-refresh) #'ignore))
-      (magpi-test-at-section (:action "cold-1")
+    (puthash "writer-1" action magpi--actions)
+    (puthash "writer-1" 'test-handle magpi--handles)
+    (cl-letf (((symbol-function 'derived-mode-p)
+               (lambda (&rest modes) (memq 'pimacs-chat-mode modes)))
+              ((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
+              ((symbol-function 'magpi--paint-glance) #'ignore))
+      (magpi-test-at-section (:action "writer-1" :intention "intent-1")
+        (should (eq (magpi-discard-scope) 'chat))
         (magpi-discard)))
     (should (equal (magpi-test-backend-terminated backend) '(test-handle)))
-    (should-not (gethash "cold-1" magpi--handles))
-    (should-not (magpi-action-observation (gethash "cold-1" magpi--actions)))
+    (should-not (gethash "writer-1" magpi--handles))
+    (should-not (magpi-action-observation (gethash "writer-1" magpi--actions)))
     (should (equal (plist-get (magpi-intention-writer-lease
                                (gethash "intent-1" magpi--intentions))
                               :action-id)
-                   "cold-1"))))
+                   "writer-1"))))
 
+(ert-deftest magpi-discard-revokes-saved-listener ()
+  "Promise: a saved adapter callback cannot restore Observation after discard."
+  (magpi-test-without-store
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--listener-epochs (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (launch (magpi-launch-build default-directory nil 'writer '(:kind none)))
+         stale)
+    (unwind-protect
+        (progn
+          (magpi-spawn-spec "stale-1" "Inspect this" launch)
+          (setq stale (magpi-test-backend-listener backend))
+          (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t)))
+            (magpi-test-at-section (:action "stale-1")
+              (magpi-discard)))
+          (should-not (magpi-action-observation (gethash "stale-1" magpi--actions)))
+          (funcall stale '(:type model-observed :model "openai/gpt-4.1"))
+          (funcall stale '(:type activity-started :activity "thinking"))
+          (should-not (magpi-action-observation (gethash "stale-1" magpi--actions)))
+          (should-not (gethash "stale-1" magpi--handles)))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer))))))
 (ert-deftest magpi-discard-action-releases-writer ()
   "Promise: action depth drops chat and releases this doing's writer."
   (let* ((backend (make-magpi-test-backend))
@@ -788,7 +1460,7 @@ Orchestration no longer eagerly requires status; tests that call
     (puthash "writer-1" action magpi--actions)
     (puthash "writer-1" 'test-handle magpi--handles)
     (cl-letf (((symbol-function 'yes-or-no-p) (lambda (_prompt) t))
-              ((symbol-function 'magpi--schedule-refresh) #'ignore)
+              ((symbol-function 'magpi--paint-glance) #'ignore)
               ((symbol-function 'magpi--intention)
                (lambda (id) (gethash id magpi--intentions)))
               ((symbol-function 'magpi-intention-release-writer)
@@ -840,7 +1512,7 @@ Orchestration no longer eagerly requires status; tests that call
                  (let ((next (copy-magpi-intention record)))
                    (setf (magpi-intention-state next) 'discarded)
                    next)))
-              ((symbol-function 'magpi--schedule-refresh) #'ignore)
+              ((symbol-function 'magpi--paint-glance) #'ignore)
               ((symbol-function 'magpi--intention)
                (lambda (id) (gethash id magpi--intentions))))
       (magpi-test-at-section (:intention "intent-1")
@@ -855,6 +1527,48 @@ Orchestration no longer eagerly requires status; tests that call
                 'discarded))
     (should (string-match-p "force-removes" prompt))
     (should (string-match-p "2 actions" prompt))))
+
+(ert-deftest magpi-discard-leftover-worktree-terminates-children ()
+  "Promise: leftover checkout k is still nested: theatre first, then remove."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--intentions (make-hash-table :test #'equal))
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Already merged" :state 'merged))
+         (action (make-magpi-action :id "writer-1" :intention-id "intent-1"
+                                    :observation (make-magpi-observation
+                                                  :activity-state 'idle)))
+         prompt removed discarded)
+    (puthash "intent-1" intention magpi--intentions)
+    (puthash "writer-1" action magpi--actions)
+    (puthash "writer-1" 'writer-handle magpi--handles)
+    (cl-letf (((symbol-function 'magpi-intention-git-facts)
+               (lambda (_intention) '(:checkout dirty)))
+              ((symbol-function 'yes-or-no-p)
+               (lambda (p) (setq prompt p) t))
+              ((symbol-function 'magpi-intention-remove-worktree)
+               (lambda (record) (setq removed t) record))
+              ((symbol-function 'magpi-intention-discard-record)
+               (lambda (record) (setq discarded t) record))
+              ((symbol-function 'magpi--paint-glance) #'ignore)
+              ((symbol-function 'magpi--intention)
+               (lambda (id) (gethash id magpi--intentions)))
+              ((symbol-function 'magpi-discard--git-scope-p) (lambda () nil)))
+      (let ((magpi-intention-metadata '(:intention-id "intent-1")))
+        (magpi-test-at-section ()
+          (should (eq (magpi-discard-scope) 'worktree))
+          (magpi-discard))))
+    (should removed)
+    (should-not discarded)
+    (should (equal (magpi-test-backend-terminated backend) '(writer-handle)))
+    (should-not (gethash "writer-1" magpi--handles))
+    (should-not (magpi-action-observation (gethash "writer-1" magpi--actions)))
+    (should (eq (magpi-intention-state (gethash "intent-1" magpi--intentions))
+                'merged))
+    (should (string-match-p "leftover" prompt))
+    (should (string-match-p "1 action" prompt))))
 
 (ert-deftest magpi-discard-magit-hunk-delegates ()
   "Promise: Magit hunk/file/list stay Magit discard."
@@ -1001,6 +1715,39 @@ Orchestration no longer eagerly requires status; tests that call
           (should (magpi-action-started-at second)))
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer))))))
+
+(ert-deftest magpi-dead-retry-after-disconnect-is-not-blood ()
+  "Promise: successful retry produces reconnected; running activity is aloft."
+  (magpi-test-without-store
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--listener-epochs (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (launch (magpi-launch-build default-directory nil 'writer '(:kind none)))
+         action)
+    (unwind-protect
+        (progn
+          (setq action (magpi-spawn-spec "retry-blood" "Inspect this" launch))
+          (magpi--handle-event "retry-blood" '(:type disconnected))
+          (should (eq (magpi-observation-auspice
+                       (magpi-action-observation
+                        (gethash "retry-blood" magpi--actions)))
+                      'blood))
+          (puthash "retry-blood" 'dead magpi--handles)
+          (setq action (magpi-spawn-spec "retry-blood" "Inspect this" launch))
+          (let ((observation (magpi-action-observation action)))
+            (should (eq (magpi-observation-connection-state observation)
+                        'connected))
+            (should (eq (magpi-observation-activity-state observation)
+                        'running))
+            (should (equal (magpi-observation-activity observation) "thinking"))
+            (should-not (magpi-observation-problem observation))
+            (should (eq (magpi-observation-auspice observation) 'aloft))))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer))))))
+
 (ert-deftest magpi-existing-kernel-ensure-process-does-not-reborn-theatre ()
   "Promise: a hydrated kernel is process-retry only; no second birth."
   (let* ((backend (make-magpi-test-backend))
@@ -1028,6 +1775,90 @@ Orchestration no longer eagerly requires status; tests that call
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer)))))
 
+(ert-deftest magpi-resume-root-grouped-requires-live-checkout ()
+  "Promise: missing intention work is not source-root or the current repo."
+  (let* ((magpi--intentions (make-hash-table :test #'equal))
+         (magpi--actions (make-hash-table :test #'equal))
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Why" :state 'active
+                     :source-root "/tmp/project/"))
+         (grouped (make-magpi-action
+                   :id "grouped-1"
+                   :intention-id "intent-1"
+                   :source-root "/tmp/project/")))
+    (puthash "intent-1" intention magpi--intentions)
+    (puthash "grouped-1" grouped magpi--actions)
+    (cl-letf (((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) nil))
+              ((symbol-function 'magpi--root)
+               (lambda () "/tmp/elsewhere/"))
+              ((symbol-function 'magpi-intention-ensure-worktree)
+               (lambda (&rest _) (error "must not manufacture a checkout")))
+              ((symbol-function 'magpi-action-save)
+               (lambda (&rest _) (error "must not persist another locator"))))
+      (should-error (magpi--resume-root grouped) :type 'user-error)
+      (should-error (magpi--action-with-launch grouped) :type 'user-error)
+      (should-not (magpi-action-launch (gethash "grouped-1" magpi--actions))))))
+
+(ert-deftest magpi-ensure-process-grouped-retained-launch-requires-checkout ()
+  "Promise: retained Launch does not attach without the live grouped checkout."
+  (let* ((backend (make-magpi-test-backend))
+         (magpi-backend backend)
+         (magpi--actions (make-hash-table :test #'equal))
+         (magpi--handles (make-hash-table :test #'equal))
+         (magpi--intentions (make-hash-table :test #'equal))
+         (magpi--refresh-timer nil)
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Why" :state 'active
+                     :source-root "/tmp/project/"))
+         (launch (magpi-launch-build "/tmp/work/" nil 'writer '(:kind none)))
+         (grouped (make-magpi-action
+                   :id "grouped-1"
+                   :intention-id "intent-1"
+                   :source-root "/tmp/project/"
+                   :launch launch)))
+    (puthash "intent-1" intention magpi--intentions)
+    (puthash "grouped-1" grouped magpi--actions)
+    (unwind-protect
+        (cl-letf (((symbol-function 'magpi-intention-worktree-path)
+                   (lambda (_intention) nil))
+                  ((symbol-function 'magpi-intention-ensure-worktree)
+                   (lambda (&rest _) (error "must not manufacture a checkout")))
+                  ((symbol-function 'magpi-action-save)
+                   (lambda (&rest _) (error "must not persist another locator"))))
+          (should-error (magpi--resume-root grouped) :type 'user-error)
+          (should (eq grouped (magpi--action-with-launch grouped)))
+          (should-error (magpi--ensure-process "grouped-1") :type 'user-error)
+          (should-not (magpi-test-backend-spawn-count backend))
+          (puthash "grouped-1" 'dead magpi--handles)
+          (should-error (magpi--ensure-process "grouped-1" t) :type 'user-error)
+          (should-not (magpi-test-backend-spawn-count backend))
+          (should (eq (gethash "grouped-1" magpi--handles) 'dead)))
+      (when (timerp magpi--refresh-timer)
+        (cancel-timer magpi--refresh-timer)))))
+(ert-deftest magpi-resume-root-grouped-uses-live-checkout ()
+  "Promise: grouped reopen uses the live intention checkout."
+  (let* ((magpi--intentions (make-hash-table :test #'equal))
+         (intention (make-magpi-intention
+                     :id "intent-1" :objective "Why" :state 'active
+                     :source-root "/tmp/project/"))
+         (grouped (make-magpi-action
+                   :id "grouped-1"
+                   :intention-id "intent-1"
+                   :source-root "/tmp/project/")))
+    (puthash "intent-1" intention magpi--intentions)
+    (cl-letf (((symbol-function 'magpi-intention-worktree-path)
+               (lambda (_intention) "/tmp/work/"))
+              ((symbol-function 'magpi--root)
+               (lambda () "/tmp/elsewhere/")))
+      (should (equal (magpi--resume-root grouped) "/tmp/work/")))))
+
+(ert-deftest magpi-resume-root-standalone-keeps-source-root ()
+  "Promise: standalone reopen keeps source-root, not the current repository."
+  (let ((alone (make-magpi-action :id "alone" :source-root "/tmp/project/")))
+    (cl-letf (((symbol-function 'magpi--root)
+               (lambda () "/tmp/elsewhere/")))
+      (should (equal (magpi--resume-root alone) "/tmp/project/")))))
 (ert-deftest magpi-spawn-from-options-births-once-before-process ()
   "Promise: create freezes theatre once; ensure-process does not rebuild."
   (let* ((backend (make-magpi-test-backend))
@@ -1064,6 +1895,57 @@ Orchestration no longer eagerly requires status; tests that call
       (when (timerp magpi--refresh-timer)
         (cancel-timer magpi--refresh-timer)))))
 
+(ert-deftest magpi-refused-writer-is-not-launchable ()
+  "Promise: a held lease refuses writers before birth; RET cannot attach them."
+  (magpi-test-with-repo (repository "magpi-writer-admit-")
+    (let* ((backend (make-magpi-test-backend))
+           (magpi-backend backend)
+           (magpi--actions (make-hash-table :test #'equal))
+           (magpi--handles (make-hash-table :test #'equal))
+           (magpi--intentions (make-hash-table :test #'equal))
+           (magpi--refresh-timer nil)
+           (magpi-launch--catalog (make-hash-table :test #'equal))
+           (magpi-launch--last-model (make-hash-table :test #'equal))
+           (default-directory repository)
+           (ids '("holder" "refused")))
+      (unwind-protect
+          (progn
+            (magpi-intention-create-record "Lease" repository "lease")
+            (cl-letf (((symbol-function 'magpi--root) (lambda () repository))
+                      ((symbol-function 'magpi--capture-bind)
+                       (lambda (_kind) '(:kind none)))
+                      ((symbol-function 'magpi-store-new-id)
+                       (lambda () (pop ids))))
+              (magpi-spawn-from-options
+               '(:intention-id "lease" :role writer :lease t :context-kind none))
+              (should (equal (plist-get (magpi-intention-writer-lease
+                                         (magpi--intention "lease"))
+                                        :action-id)
+                             "holder"))
+              (should-error
+               (magpi-spawn-from-options
+                '(:intention-id "lease" :role writer :context-kind none)))
+              (should-not (magpi--lookup-action "refused"))
+              (should-not (magpi-action-load repository "refused"))
+              (let ((denied (car (last (magpi-intention-audit
+                                        (magpi--intention "lease"))))))
+                (should (eq (plist-get denied :type) 'writer-denied))
+                (should (equal (plist-get denied :action-id) "refused")))
+              (puthash "refused"
+                       (make-magpi-action
+                        :id "refused"
+                        :intention-id "lease"
+                        :chat-ref "refused"
+                        :source-root repository
+                        :launch (magpi-launch-build
+                                 repository nil 'writer '(:kind none)))
+                       magpi--actions)
+              (magpi-test-at-section (:action "refused")
+                (should-error (magpi-visit)))
+              (should-not (gethash "refused" magpi--handles))
+              (should (equal (magpi-test-backend-spawn-count backend) 1))))
+        (when (timerp magpi--refresh-timer)
+          (cancel-timer magpi--refresh-timer))))))
 
 (ert-deftest magpi-action-miss-loads-kernel-without-birth ()
   "Promise: table miss loads that id; process retry does not send-initial."
@@ -1123,13 +2005,7 @@ Orchestration no longer eagerly requires status; tests that call
       (should-not (gethash id magpi--actions))
       ;; Heading paint is status-owned; opt in explicitly (no eager magpi require).
       (magpi-tests-require-status)
-      (should (equal (magpi-status--heading-suffix joined)
-                     (mapconcat #'identity
-                                (delq nil
-                                      (list (magpi-status--auspice-motion 'cold)
-                                            (magpi-status--age-label
-                                             (magpi-action-created-at joined))))
-                                " · "))))))
+      (should (eq (magpi-status-view-slot (magpi-status-action-view joined) 'motion) 'cold)))))
 
 (ert-deftest magpi-intention-commands-reread-disk ()
   "Promise: effects load Intention coordinates; stale RAM does not win."
@@ -1145,6 +2021,20 @@ Orchestration no longer eagerly requires status; tests that call
         (should (equal (magpi-intention-objective (magpi--intention "reread"))
                        "Disk why"))))))
 
+
+(ert-deftest magpi-intention-create-always-mints-a-new-being ()
+  "Promise: create always creates; matching objective is not identity."
+  (magpi-test-with-repo (repository "magpi-intention-create-new-")
+    (let ((magpi--intentions (make-hash-table :test #'equal)))
+      (cl-letf (((symbol-function 'magpi--root) (lambda () repository)))
+        (let ((first (magpi-intention-create "Same why"))
+              (second (magpi-intention-create "Same why")))
+          (should-not (equal (magpi-intention-id first)
+                             (magpi-intention-id second)))
+          (should (equal (magpi-intention-objective first) "Same why"))
+          (should (equal (magpi-intention-objective second) "Same why"))
+          (should (magpi-intention-load repository (magpi-intention-id first)))
+          (should (magpi-intention-load repository (magpi-intention-id second))))))))
 
 (ert-deftest magpi-chat-candidate-label-matches-action-id ()
   (let* ((action (make-magpi-action :id "hist-1" :chat-ref "hist-1"))
@@ -1177,17 +2067,16 @@ Orchestration no longer eagerly requires status; tests that call
         (when (magpi-action-p action)
           (let* ((label (magpi--chat-candidate-label-for-action action candidates))
                  (magpi-status-action-title-function (lambda (a) label))
-                 (heading (substring-no-properties (magpi-status--heading action)))
-                 (suffix (magpi-status--heading-suffix action)))
-            (should (string-prefix-p (magpi-status--auspice-motion 'cold) suffix))
+                 (heading (magpi-status-view-slot (magpi-status-action-view action) 'title)))
+            (should (eq (magpi-status-view-slot (magpi-status-action-view action) 'motion) 'cold))
             (should-not (magpi-action-observation action))
             (when label
               (setq titled (1+ titled))
               (should (or (equal heading label)
                           (and (string-suffix-p "…" heading)
                                (string-prefix-p (substring heading 0 -1) label))))
-              (should-not (string-match-p "\\`New chat" heading))
-              (should-not (string-match-p "\\`New task" heading))))))
+              ;; Live titles may start with those words; reject placeholders only.
+              (should-not (magpi-pimacs--generated-session-name-p heading))))))
       ;; Eleven of twelve durable actions currently have matching sessions.
       (should (>= titled 11)))))
 (provide 'magpi-tests)

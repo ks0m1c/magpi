@@ -127,6 +127,12 @@ Interrupts are the plays. Rows already green in unit tests are marked
   Happy path: directory gone, record =discarded=.
 - Status: happy path *unit*; failed remove *not written*.
 
+*** B5 Git delete leaves Magpi records
+- Interrupt: birth intention+action; =git worktree remove --force= (Magit delete).
+- Gauge: checkout gone; Intention still =active= on disk; Action file still
+  present; glance still lists the live intention.
+- Status: *life-git*.
+
 *** B4 Extra keys / unreadable
 - Interrupt: =:future-field= on disk; truncated plist as =bad.el=.
 - Gauge: extra survives next save; list contains =magpi-unreadable= with path
@@ -233,6 +239,19 @@ where we *chose* them equal.
 - Gauge: disk =chat-ref= = id; open reconnects same Pi id; observation nil
   until events. This *is* restart for Magpi's purposes.
 - Fail: hydrate paints =starting=; open mints a new Pi session.
+- Status: *life-pi*.
+
+*** D7 Action discard leaves the Pi session
+- Interrupt: D1 + user text in the jsonl; Magpi action =k=.
+- Gauge: agent gone; Action file and glance row remain; jsonl still has the
+  marker; RET reconnects the *same* =sessionId= / file (retry, not a new doing).
+- Status: *life-pi*.
+
+*** D8 Intention discard leaves the Pi session
+- Interrupt: nested Action; Magpi intention =k=.
+- Gauge: worktree gone; Intention =discarded=; Action file and jsonl marker
+  remain; RET is =user-error= (no live checkout) — no Magpi path deletes the
+  session.
 - Status: *life-pi*.
 
 ** E. Operator loop (optional, no Pi)

@@ -1,5 +1,10 @@
 ;;; magpi-action.el --- Reduce events into an immutable action -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
+
 ;; One job: reduce semantic events into an immutable action.
 ;; No Pimacs, Magit, catalog, or launch-menu dependency.
 
@@ -22,7 +27,9 @@ React answers it; status only glances.  `question' is the ask text."
   id title prompt intention-id launch observation started-at
   chat-ref created-at source-root spawn-oid extras)
 (defun magpi-observation-initial ()
-  "Return the initial observation for a newly declared action."
+  "Return the initial observation for a newly declared action.
+
+Birth declares this.  Ordinary telemetry reduction must not."
   (make-magpi-observation :activity-state 'starting
                           :connection-state 'connected))
 
@@ -147,9 +154,11 @@ duplicate event cannot look like progress and re-enter the refresh loop."
 Neither ACTION nor its observation is mutated. EVENT is a small semantic plist
 already normalized by the adapter.  If EVENT restates the current
 observation, return ACTION itself so listeners can treat reduction as
-identity-preserving and skip effects.  Unknown event types are ignored."
+identity-preserving and skip effects.  Unknown event types are ignored.
+A kernel without Observation stays cold until an explicit connection or
+activity fact; model and other telemetry do not mint starting/connected."
   (let* ((current (or (magpi-action-observation action)
-                      (magpi-observation-initial)))
+                      (make-magpi-observation)))
          (observation (copy-magpi-observation current)))
     (pcase (plist-get event :type)
       ('activity-started
@@ -199,7 +208,16 @@ identity-preserving and skip effects.  Unknown event types are ignored."
       ('disconnected
        (setf (magpi-observation-connection-state observation) 'disconnected
              (magpi-observation-activity-state observation) 'unknown
-             (magpi-observation-activity observation) nil)))
+             (magpi-observation-activity observation) nil))
+      ('reconnected
+       ;; A new live attempt, not a restated disconnect.  Absent or unknown
+       ;; activity returns to lift; a prior problem belongs to the failed connection.
+       (setf (magpi-observation-connection-state observation) 'connected
+             (magpi-observation-problem observation) nil)
+       (when (memq (magpi-observation-activity-state observation)
+                   '(nil unknown))
+         (setf (magpi-observation-activity-state observation) 'starting
+               (magpi-observation-activity observation) nil))))
     (if (magpi-observation-same-p current observation)
         action
       (let ((next (copy-magpi-action action)))

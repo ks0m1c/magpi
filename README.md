@@ -1,14 +1,52 @@
-<p align="center">
-  <img src="magpi.svg" width="240" alt="Twin Magpies in wait.">
-</p>
-
 # Magpi
 
 State your why. Bind the context that matters. Spawn an action. Interact. React.
 
-Tiny Emacs porcelain for deliberate agentic work in your Git repository, we support Pi out of the box.
+Magpi holds the why beside Pi's doing and Git's evidence. Tiny Emacs porcelain over Git, Magit, Pimacs, and Pi.
 
-## Dependencies
+<table>
+<tr>
+  <td align="center" valign="middle" width="18%">
+    <img src="assets/magpi-seal.png" width="100%" alt="Twin magpies in wait.">
+  </td>
+  <td align="center" valign="middle" width="82%">
+    <img src="assets/magpi-perch.png" width="100%" alt="Magpi status: empty perch teaching i and standalone s beside aloft on MAGPI · bridge — intention Reunite two lovers, action Bridge the milky way on wingbeat, ear hearing.">
+  </td>
+</tr>
+</table>
+
+## How to
+
+`C-c m m` opens Magpi status. `C-c m i` and `C-c m @` work anywhere.
+
+| | Key | Meaning |
+|---|-----|---------|
+| author | `i` | create an intention |
+| | `s` | spawn an action |
+| | `@` | bind context at point |
+| glance | `TAB` | fold |
+| | `n` / `p` | next / previous last-seen chat |
+| | `j` | Perch ↔ Cold |
+| | `g` | reconcile and repaint |
+| judge | `RET` | intention → Magit; action → chat; ask → React |
+| | `v` | live writer → garden; idle exclusive writer occupies source |
+| | `a` | React |
+| | `k` | discard chat / action / intention / worktree at point |
+| depth | `m` `d` `l` `c` | Magit status, diff, log, commit |
+
+## Symbols
+
+| Mark | Meaning |
+|------|---------|
+| `?` | pending ask |
+| `!` | disconnection |
+| `w` | writer lease |
+
+Launch defaults to writer; press `w` on spawn for reader (`r`). `W` takes an
+exclusive writer lease; without it several writers may share an intention.
+Our defaults are explicit intent you author the task as the first message.
+
+## Install
 
 Magpi does not replace its priors. It is porcelain over them, as Magit is over Git.
 
@@ -21,44 +59,22 @@ Magpi does not replace its priors. It is porcelain over them, as Magit is over G
 | [Pi](https://pi.dev) | the agent | spawn, observe, react to asks |
 
 `Package-Requires` is Emacs, Magit, and Pimacs.
-Magit already pulls Transient and `magit-section`.
+Magit pulls dependencies like Transient and `magit-section` for us.
 
-## Use
-
-`C-c m m` opens Magpi status. `C-c m i` and `C-c m @` work anywhere.
-
-| Key | Meaning |
-|-----|---------|
-| `i` | create an intention |
-| `s` | spawn an action |
-| `@` | bind context at point |
-| `RET` | intention → Magit; action → chat; ask → React |
-| `n` / `p` | next / previous last-seen chat |
-| `g` | reconcile and repaint |
-| `j` | toggle Active Perch |
-| `m` `d` `l` `c` | Magit status, diff, log, commit |
-| `a` | React |
-| `k` | discard chat / action / intention / worktree at point |
-| `?` `!` | pending ask, disconnection |
-
-Launch defaults to writer (`w`); press `w` for reader (`r`). `W` takes an
-exclusive writer lease; without it several writers may share an intention.
-The objective never enters chat — you author the task as the first message.
-
-## Install
-
-Have Magit and Pimacs first. Doom:
+Emacs 29 can fetch Magpi from source:
 
 ```elisp
-(package! magpi
-  :recipe (:local-repo "magpi"
-           :files ("emacs/*.el")))
-
-(use-package! magpi
-  :commands (magpi-status magpi-spawn))
+(package-vc-install
+ '(magpi :url "https://github.com/ks0m1c/magpi"
+         :lisp-dir "emacs"))
+(require 'magpi)
 ```
 
-## Checks
+`C-c m` is bound from Magpi's autoloads.
+
+## Contributing
+
+Clone this repo, then from the root:
 
 ```sh
 make test          # unit + seams
@@ -69,7 +85,7 @@ make xref          # unused symbols, unbound commands, isolation
 make instrument    # compile + xref
 ```
 
-## Spec
+## Design Spec
 
-The names, invariants, composition, and build order live in
+The motivations, invariants, code organisation, composition, and build order live in
 [`specs/MAGPI.org`](specs/MAGPI.org).

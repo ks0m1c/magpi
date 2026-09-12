@@ -1,0 +1,172 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="1080" height="512" viewBox="0 0 1080 512" role="img" aria-labelledby="title desc" preserveAspectRatio="xMidYMid meet">
+  <title id="title">Magpi perch</title>
+  <desc id="desc">Empty perch teaching i and standalone s beside aloft on MAGPI · bridge — intention Reunite two lovers, action Bridge the milky way on wingbeat, ear hearing.</desc>
+  <defs>
+    <!--
+      Modular scale u=8. Tabular ch=8 at 13px.
+      Heading seats: attention 2ch · title 24ch · motion 5ch · Muninn 2ch · meta rest.
+      Line 22 · group 32 · pad 24. Colour is light-budget, not decoration.
+    -->
+    <style type="text/css"><![CDATA[
+      .panel { fill: #141018; stroke: #2a2432; stroke-width: 1; }
+      .chrome { fill: #18141e; }
+      .rule { stroke: #2a2432; stroke-width: 1; fill: none; }
+      .label {
+        fill: #5e5a54;
+        font-family: "Fira Code", "Adwaita Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 9px; letter-spacing: 0.22em;
+        font-feature-settings: "liga" 0, "calt" 0;
+      }
+      .chrome-t {
+        fill: #5e5a54;
+        font-family: "Fira Code", "Adwaita Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 10px;
+        font-feature-settings: "liga" 0, "calt" 0;
+      }
+      .row {
+        font-family: "Fira Code", "Adwaita Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 13px;
+        font-feature-settings: "liga" 0, "calt" 0;
+      }
+      .key {
+        font-family: "Fira Code", "Adwaita Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+        font-size: 12px;
+        font-feature-settings: "liga" 0, "calt" 0;
+      }
+      .hdr { fill: #f3eee4; font-weight: 500; }
+      .bone { fill: #f3eee4; }
+      .relic { fill: #c9a86a; }
+      .huginn { fill: #e0b15a; }
+      .evidence { fill: #6fa9b8; }
+      .quiet { fill: #8d877c; }
+      .dim { fill: #5e5a54; }
+      .m-stroke { fill: none; stroke: #e0b15a; stroke-width: 1.35; stroke-linecap: round; stroke-linejoin: round; }
+      .m-fill { fill: #e0b15a; }
+      .m-dot { fill: #e0b15a; }
+      .m-core { fill: none; stroke: #e0b15a; stroke-width: 1.4; }
+      .glow { fill: #e0b15a; opacity: 0.16; }
+    ]]></style>
+
+    <linearGradient id="night" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#120e18"/>
+      <stop offset="1" stop-color="#0b0910"/>
+    </linearGradient>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f3eee4" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#f3eee4" stop-opacity="0"/>
+    </linearGradient>
+
+    <symbol id="motion-aloft" viewBox="0 0 54 18">
+      <circle class="m-dot" cx="5" cy="9" r="1.15"/>
+      <path class="m-stroke" d="M13.5 4.8 L17.8 9.2"/>
+      <path class="m-core" d="M27 2.6 L34.4 9 L27 15.4 L19.6 9 Z"/>
+      <circle class="m-fill" cx="27" cy="9" r="1.35"/>
+      <path class="m-stroke" d="M40.5 4.8 L36.2 9.2"/>
+      <circle class="m-dot" cx="49" cy="9" r="1.15"/>
+    </symbol>
+    <symbol id="motion-cold" viewBox="0 0 54 18">
+      <circle fill="#5e5a54" cx="5" cy="9" r="1.05"/>
+      <circle fill="#5e5a54" cx="16" cy="9" r="1.05"/>
+      <circle fill="#5e5a54" cx="27" cy="9" r="1.05"/>
+      <circle fill="#5e5a54" cx="38" cy="9" r="1.05"/>
+      <circle fill="#5e5a54" cx="49" cy="9" r="1.05"/>
+    </symbol>
+    <symbol id="huginn-lit" viewBox="0 0 14 14">
+      <circle class="glow" cx="7" cy="7" r="6.5"/>
+      <path fill="none" stroke="#e0b15a" stroke-width="1.3" d="M7 1.2 L12.2 7 L7 12.8 L1.8 7 Z"/>
+      <circle fill="#e0b15a" cx="7" cy="7" r="1.2"/>
+    </symbol>
+    <symbol id="huginn-dim" viewBox="0 0 14 14">
+      <path fill="none" stroke="#3f3b34" stroke-width="1.3" d="M7 1.2 L12.2 7 L7 12.8 L1.8 7 Z"/>
+      <circle fill="#3f3b34" cx="7" cy="7" r="1.1"/>
+    </symbol>
+    <symbol id="muninn-hears" viewBox="0 0 14 14">
+      <circle fill="none" stroke="#6fa9b8" stroke-width="1.3" cx="7" cy="7" r="5"/>
+      <circle fill="#6fa9b8" cx="7" cy="7" r="2.2"/>
+    </symbol>
+    <symbol id="muninn-bound" viewBox="0 0 14 14">
+      <circle fill="none" stroke="#4a7380" stroke-width="1.3" cx="7" cy="7" r="5"/>
+    </symbol>
+    <symbol id="muninn-empty" viewBox="0 0 14 14">
+      <circle fill="#3f3b34" cx="7" cy="7" r="1.3"/>
+    </symbol>
+  </defs>
+
+  <rect width="1080" height="512" rx="12" fill="url(#night)"/>
+
+  <!-- LEFT 312 · empty sky, the loop -->
+  <g transform="translate(32, 24)">
+    <text class="label" x="0" y="10">EMPTY  ·  THE LOOP</text>
+    <g transform="translate(0, 24)">
+      <rect class="panel" width="312" height="440" rx="8"/>
+      <rect x="1" y="1" width="310" height="30" fill="url(#sheen)"/>
+      <path class="chrome" d="M0 8a8 8 0 0 1 8-8h296a8 8 0 0 1 8 8v24H0z"/>
+      <line class="rule" x1="0" y1="32" x2="312" y2="32"/>
+      <text class="chrome-t" x="16" y="21">*Magpi:bridge*</text>
+      <use href="#huginn-dim" xlink:href="#huginn-dim" x="142" y="9" width="14" height="14"/>
+      <use href="#muninn-empty" xlink:href="#muninn-empty" x="160" y="9" width="14" height="14"/>
+      <text class="chrome-t" x="296" y="21" text-anchor="end">status</text>
+
+      <g transform="translate(24, 68)">
+        <text class="row hdr" y="0">MAGPI · bridge</text>
+        <use href="#huginn-dim" xlink:href="#huginn-dim" x="248" y="-10" width="12" height="12"/>
+        <use href="#muninn-empty" xlink:href="#muninn-empty" x="264" y="-10" width="12" height="12"/>
+
+        <text class="key dim" x="16" y="56">i</text>
+        <text class="key dim" x="40" y="56">create intention</text>
+        <text class="key dim" x="16" y="84">s</text>
+        <text class="key dim" x="40" y="84">spawn action</text>
+      </g>
+    </g>
+  </g>
+
+  <!-- RIGHT 672 · aloft, grouped reading -->
+  <g transform="translate(376, 24)">
+    <text class="label" x="0" y="10">ALOFT  ·  THOUGHT MOVING</text>
+    <g transform="translate(0, 24)">
+      <rect class="panel" width="672" height="440" rx="8"/>
+      <rect x="1" y="1" width="670" height="30" fill="url(#sheen)"/>
+      <path class="chrome" d="M0 8a8 8 0 0 1 8-8h656a8 8 0 0 1 8 8v24H0z"/>
+      <line class="rule" x1="0" y1="32" x2="672" y2="32"/>
+      <text class="chrome-t" x="16" y="21">*Magpi:bridge*</text>
+      <use href="#huginn-lit" xlink:href="#huginn-lit" x="322" y="9" width="14" height="14"/>
+      <use href="#muninn-hears" xlink:href="#muninn-hears" x="340" y="9" width="14" height="14"/>
+      <text class="chrome-t" x="656" y="21" text-anchor="end">magpi-status</text>
+
+      <!-- seats: att 0–16 · title 16–208 · motion 216–256 · M 264–280 · meta 296 -->
+      <g transform="translate(24, 68)">
+        <text class="row hdr" y="0">MAGPI · bridge</text>
+        <use href="#huginn-lit" xlink:href="#huginn-lit" x="600" y="-10" width="13" height="13"/>
+        <use href="#muninn-hears" xlink:href="#muninn-hears" x="618" y="-10" width="13" height="13"/>
+
+        <!-- intention · why held -->
+        <text class="row bone" x="16" y="40">Reunite two lovers</text>
+        <use href="#motion-cold" xlink:href="#motion-cold" x="216" y="27" width="40" height="14"/>
+        <use href="#muninn-bound" xlink:href="#muninn-bound" x="264" y="28" width="14" height="14"/>
+        <text class="key dim" x="296" y="40">w · dirty · +2 −0</text>
+
+        <text class="key dim" x="16" y="70">bindings</text>
+        <text class="key evidence" x="32" y="92">@file usr/cowherd  #one-night</text>
+        <text class="key evidence" x="32" y="114">@file usr/weaver</text>
+
+        <!-- action · omen then reading -->
+        <text class="row relic" x="16" y="154">Bridge the milky way</text>
+        <use href="#motion-aloft" xlink:href="#motion-aloft" x="216" y="141" width="40" height="14"/>
+        <use href="#muninn-hears" xlink:href="#muninn-hears" x="264" y="142" width="14" height="14"/>
+        <text class="row huginn" x="296" y="154">aloft</text>
+        <text class="key dim" x="344" y="154"> · medium · writer · deepseek-v3.2</text>
+
+        <text class="key dim" x="16" y="186">role</text>
+        <text class="key quiet" x="112" y="186">writer</text>
+        <text class="key dim" x="16" y="208">activity</text>
+        <text class="key huginn" x="112" y="208">thinking</text>
+        <text class="key dim" x="16" y="230">last</text>
+        <text class="key quiet" x="112" y="230">Come with me if you want to live.</text>
+
+        <text class="key dim" x="16" y="270">observed files</text>
+        <text class="key evidence" x="32" y="292">.ssh/config</text>
+        <text class="key evidence" x="32" y="314">.ssh/authorized_keys</text>
+      </g>
+    </g>
+  </g>
+</svg>

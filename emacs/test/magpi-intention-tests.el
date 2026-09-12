@@ -9,7 +9,7 @@
 (require 'magpi-intention)
 (require 'magpi-test-repo)
 (ert-deftest magpi-intention-persists-one-change-and-guards-its-writer ()
-  "Promise: one intention, one change; one writer; merge is explicit."
+  "Promise: one intention, one change; one writer; disposition is explicit."
   (magpi-test-with-repo (repository)
     (let ((intention
            (magpi-intention-create-record "Shared task set" repository "shared")))
@@ -20,8 +20,7 @@
 
       (setq intention (magpi-intention-ensure-worktree intention))
       (should (file-directory-p (magpi-intention-worktree-path intention)))
-      (should (string-match-p "magpi/shared-task-set-shared"
-                              (magpi-intention-branch intention)))
+      (should (equal (magpi-intention-branch intention) "magpi/shared"))
       (should (eq (magpi-intention-state intention) 'active))
       (should (equal (magpi-intention-objective
                       (magpi-intention-load repository "shared"))
@@ -43,7 +42,7 @@
       (should (eq (plist-get (car (last (magpi-intention-audit intention)))
                              :type)
                   'writer-denied))
-      (should-error (magpi-intention-merge-record intention))
+      (should-error (magpi-intention--guard-quiescent intention "open merge"))
       (should (equal (plist-get (magpi-intention-writer-lease intention) :action-id)
                      "task-1"))
 
@@ -55,11 +54,14 @@
         (should (eq (plist-get facts :checkout) 'clean))
         (should (= (plist-get facts :ahead) 1)))
 
-      (setq intention (magpi-intention-merge-record intention))
+      (setq intention
+            (magpi-intention-set-state
+             intention 'merged "operator merged after Git evidence"))
       (should (eq (magpi-intention-state intention) 'merged))
       (should-error (magpi-intention-set-state intention 'active))
-      (should (file-exists-p (expand-file-name "result" repository)))
       (setq intention (magpi-intention-remove-worktree intention))
+      (dolist (entry (magpi-intention-audit intention))
+        (should-not (plist-member entry :path)))
       (should-not (file-directory-p
                    (or (magpi-intention-worktree-path intention) "/nonexistent")))
       (should (eq (magpi-intention-state
@@ -72,13 +74,12 @@
     (let* ((intention (make-magpi-intention
                        :id "gone" :objective "Gone"
                        :source-root repository
-                       :worktree-path (expand-file-name "absent" repository)
-                       :branch "magpi/gone" :base-ref "master"
+                       :target-ref "master"
+                       :genesis-oid "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
                        :state 'discarded))
            (facts (magpi-intention-git-facts intention)))
       (should (eq (plist-get facts :checkout) 'missing))
       (should-not (plist-get facts :ahead)))))
-
 
 (ert-deftest magpi-intention-writers-share-until-exclusive-lease ()
   "Promise: several writers share; W takes the lease and then refuses writers."
@@ -119,43 +120,6 @@
                           :label "Earlier chat"
                           :tags ("research" "handoff")))))))))
 
-
-(ert-deftest magpi-intention-merge-records-object-ids ()
-  "Promise: a completed merge audit names Git objects, not just branch names."
-  (magpi-test-with-repo (repository "magpi-intention-merge-oids-")
-    (let ((intention (magpi-intention-create-record "Ship oids" repository "oids")))
-      (setq intention (magpi-intention-ensure-worktree intention))
-      (with-temp-file (expand-file-name "result" (magpi-intention-worktree-path intention))
-        (insert "from action\n"))
-      (magpi-test-repo-git (magpi-intention-worktree-path intention) "add" "result")
-      (magpi-test-repo-git (magpi-intention-worktree-path intention) "commit" "-m" "action")
-      (setq intention (magpi-intention-merge-record intention))
-      (should (eq (magpi-intention-state intention) 'merged))
-      (let ((merged (seq-find (lambda (entry) (eq (plist-get entry :type) 'merged))
-                              (magpi-intention-audit intention))))
-        (should (string-match-p "\\`[0-9a-f]\\{40\\}\\'" (plist-get merged :from-oid)))
-        (should (string-match-p "\\`[0-9a-f]\\{40\\}\\'" (plist-get merged :to-oid)))
-        (should-not (equal (plist-get merged :from-oid) (plist-get merged :to-oid)))))))
-
-(ert-deftest magpi-intention-failed-merge-stays-active-and-audits ()
-  "Promise: a conflicted merge is not success; Magpi keeps the recovery path."
-  (magpi-test-with-repo (repository "magpi-intention-merge-fail-")
-    (let ((intention (magpi-intention-create-record "Conflict" repository "fail")))
-      (setq intention (magpi-intention-ensure-worktree intention))
-      (with-temp-file (expand-file-name "README" (magpi-intention-worktree-path intention))
-        (insert "worktree\n"))
-      (magpi-test-repo-git (magpi-intention-worktree-path intention) "add" "README")
-      (magpi-test-repo-git (magpi-intention-worktree-path intention) "commit" "-m" "worktree")
-      (with-temp-file (expand-file-name "README" repository)
-        (insert "source\n"))
-      (magpi-test-repo-git repository "add" "README")
-      (magpi-test-repo-git repository "commit" "-m" "source")
-      (should-error (magpi-intention-merge-record intention))
-      (setq intention (magpi-intention-load repository "fail"))
-      (should (eq (magpi-intention-state intention) 'active))
-      (should (eq (plist-get (car (last (magpi-intention-audit intention))) :type)
-                  'merge-failed))
-      (should (file-exists-p (expand-file-name ".git/MERGE_HEAD" repository))))))
 
 (ert-deftest magpi-intention-discard-force-removes-dirty-worktree ()
   "Promise: discard is explicit force-remove; the record stays as discarded."
@@ -224,36 +188,63 @@
       (should-not (plist-member data :version))
       (should-not (plist-member data :type)))))
 
-(ert-deftest magpi-intention-birth-freezes-base-oid-not-moving-ref ()
-  "Promise: base-oid is birth; advancing the destination does not rewrite it."
+(ert-deftest magpi-intention-birth-freezes-genesis-oid-not-moving-ref ()
+  "Promise: genesis-oid is birth; advancing the destination does not rewrite it."
   (magpi-test-with-repo (repository "magpi-intention-oid-")
-    (let* ((intention (magpi-intention-create-record "Freeze origin" repository "orig"))
+    (let* ((intention (magpi-intention-create-record "Freeze genesis" repository "orig"))
            birth)
       (setq intention (magpi-intention-ensure-worktree intention))
-      (setq birth (magpi-intention-base-oid intention))
+      (setq birth (magpi-intention-genesis-oid intention))
       (should (string-match-p "\\`[0-9a-f]\\{40\\}\\'" birth))
-      (should (string-prefix-p "refs/heads/" (magpi-intention-base-ref intention)))
+      (should (string-prefix-p "refs/heads/" (magpi-intention-target-ref intention)))
       (with-temp-file (expand-file-name "moved" repository)
         (insert "main moved\n"))
       (magpi-test-repo-git repository "add" "moved")
-      (magpi-test-repo-git repository "commit" "-m" "move base")
+      (magpi-test-repo-git repository "commit" "-m" "move target")
       (setq intention (magpi-intention-load repository "orig"))
-      (should (equal (magpi-intention-base-oid intention) birth))
-      (should (equal (plist-get (magpi-intention-git-facts intention) :origin) 'present))
+      (should (equal (magpi-intention-genesis-oid intention) birth))
+      (should (equal (plist-get (magpi-intention-git-facts intention) :genesis) 'present))
       (should (equal (magpi-intention-work-range intention)
                      (format "%s..HEAD" birth))))))
 
-(ert-deftest magpi-intention-unknown-origin-is-not-filled-from-base-ref ()
-  "Promise: missing base-oid stays unknown; Magit work range refuses."
+(ert-deftest magpi-intention-unknown-genesis-is-not-filled-from-target-ref ()
+  "Promise: missing genesis-oid stays unknown; Magit work range refuses."
   (magpi-test-with-repo (repository "magpi-intention-unknown-")
     (let ((intention (magpi-intention-create-record "Old" repository "old")))
       (setq intention (magpi-intention-ensure-worktree intention))
-      (setf (magpi-intention-base-oid intention) nil)
+      (setf (magpi-intention-genesis-oid intention) nil)
       (magpi-intention-save intention)
       (setq intention (magpi-intention-load repository "old"))
-      (should (eq (plist-get (magpi-intention-git-facts intention) :origin) 'unknown))
+      (should (eq (plist-get (magpi-intention-git-facts intention) :genesis) 'unknown))
       (should-not (plist-get (magpi-intention-git-facts intention) :work))
       (should-error (magpi-intention-work-range intention)))))
+
+(ert-deftest magpi-intention-legacy-origin-keys-load-as-target-and-genesis ()
+  "Promise: old :base-ref / :base-oid files load and rewrite as target/genesis."
+  (magpi-test-with-repo (repository "magpi-intention-legacy-")
+    (let* ((intention (magpi-intention-create-record "Legacy" repository "leg"))
+           (file (magpi-intention--file repository "leg"))
+           data)
+      (setq intention (magpi-intention-ensure-worktree intention))
+      (setq data (magpi-store-read file))
+      (magpi-store-write file
+                         (list :id "leg"
+                               :objective "Legacy"
+                               :state 'active
+                               :base-ref (plist-get data :target-ref)
+                               :base-oid (plist-get data :genesis-oid)
+                               :created-at (plist-get data :created-at)))
+      (setq intention (magpi-intention-load repository "leg"))
+      (should (equal (magpi-intention-target-ref intention)
+                     (plist-get data :target-ref)))
+      (should (equal (magpi-intention-genesis-oid intention)
+                     (plist-get data :genesis-oid)))
+      (magpi-intention-save intention)
+      (setq data (magpi-store-read file))
+      (should (plist-member data :target-ref))
+      (should (plist-member data :genesis-oid))
+      (should-not (plist-member data :base-ref))
+      (should-not (plist-member data :base-oid)))))
 
 (ert-deftest magpi-store-frozen-range-is-locator-not-keep-alive ()
   "Promise: frozen oid..HEAD; ancestor check is standalone-only."
@@ -269,13 +260,18 @@
                      (format "%s..HEAD" child)))
       (should (equal (magpi-store-frozen-range repository child t)
                      (format "%s..HEAD" child)))
+      (should (magpi-store-oid-ancestor-p repository parent "HEAD"))
+      (should (magpi-store-oid-ancestor-p repository child "HEAD"))
       (magpi-test-repo-git repository "reset" "--hard" parent)
+      (should (magpi-store-oid-ancestor-p repository parent "HEAD"))
+      (should-not (magpi-store-oid-ancestor-p repository child "HEAD"))
       (should-error (magpi-store-frozen-range repository child t))
       (should (equal (magpi-store-frozen-range repository child)
                      (format "%s..HEAD" child)))
       (should-error (magpi-store-frozen-range repository nil))
       (should-error (magpi-store-frozen-range repository
-                                             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")))))
+                                             "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"))
+      (should-not (magpi-store-oid-ancestor-p repository child "HEAD"))))
 
 (ert-deftest magpi-intention-refuses-detached-birth ()
   "Promise: detached HEAD is not a merge destination."
@@ -291,16 +287,14 @@
            (first (magpi-intention-ensure-worktree intention))
            (path (magpi-intention-worktree-path first))
            (branch (magpi-intention-branch first))
-           (oid (magpi-intention-base-oid first))
+           (oid (magpi-intention-genesis-oid first))
            (retry (copy-magpi-intention intention)))
-      (setf (magpi-intention-worktree-path retry) nil
-            (magpi-intention-branch retry) nil
-            (magpi-intention-base-ref retry) nil
-            (magpi-intention-base-oid retry) nil)
+      (setf (magpi-intention-target-ref retry) nil
+            (magpi-intention-genesis-oid retry) nil)
       (setq retry (magpi-intention-ensure-worktree retry))
       (should (file-equal-p (magpi-intention-worktree-path retry) path))
       (should (equal (magpi-intention-branch retry) branch))
-      (should (equal (magpi-intention-base-oid retry) oid)))))
+      (should (equal (magpi-intention-genesis-oid retry) oid)))))
 
 (ert-deftest magpi-intention-unreadable-stays-visible ()
   "Promise: corrupt records are not silently dropped."
@@ -313,31 +307,121 @@
         (should (seq-find #'magpi-intention-p records))
         (should (seq-find #'magpi-unreadable-p records))))))
 
-(ert-deftest magpi-intention-merge-writes-receipt-before-git ()
-  "Promise: merge-started is on disk before the merge commit exists."
-  (magpi-test-with-repo (repository "magpi-intention-receipt-")
-    (let ((intention (magpi-intention-create-record "Receipt" repository "rcpt")))
+(ert-deftest magpi-intention-birth-uses-the-garden-and-keeps-invoking-head ()
+  "Promise: birth adds magpi/<id> under the home; no checkout is switched."
+  (magpi-test-with-repo (repository "magpi-intention-wt-garden-")
+    (let* ((intention (magpi-intention-create-record "Stay outside" repository "inside"))
+           (before (magpi-test-repo-git repository "symbolic-ref" "--quiet" "HEAD"))
+           data)
       (setq intention (magpi-intention-ensure-worktree intention))
-      (with-temp-file (expand-file-name "result" (magpi-intention-worktree-path intention))
-        (insert "ok\n"))
-      (magpi-test-repo-git (magpi-intention-worktree-path intention) "add" "result")
-      (magpi-test-repo-git (magpi-intention-worktree-path intention) "commit" "-m" "ok")
-      (setq intention (magpi-intention-merge-record intention))
-      (should (seq-find (lambda (entry) (eq (plist-get entry :type) 'merge-started))
-                        (magpi-intention-audit intention)))
-      (should (eq (magpi-intention-state intention) 'merged)))))
+      (should (file-equal-p (magpi-intention-worktree-path intention)
+                            (magpi-intention--preferred-path repository "inside")))
+      (should (equal (magpi-intention-branch intention) "magpi/inside"))
+      (should (equal (string-trim before)
+                     (string-trim (magpi-test-repo-git repository
+                                                      "symbolic-ref" "--quiet" "HEAD"))))
+      (should-not (file-directory-p (expand-file-name ".magpi-worktrees" repository)))
+      (setq data (magpi-store-read (magpi-intention--file repository "inside")))
+      (should-not (plist-member data :worktree-path))
+      (should-not (plist-member data :branch))
+      (dolist (entry (plist-get data :audit))
+        (should-not (plist-member entry :path)))
+      (should (magpi-intention-target-ref
+               (magpi-intention-load repository "inside"))))))
+(ert-deftest magpi-intention-garden-is-global-and-stable ()
+  "Promise: preferred path follows git-common-dir, not the invoking checkout."
+  (magpi-test-with-repo (repository "magpi-intention-garden-")
+    (let* ((home (make-temp-file "magpi-test-home-" t))
+           (link-parent (make-temp-file "magpi-test-link-" t))
+           (linked (expand-file-name "linked" link-parent))
+           (magpi-home-directory home))
+      (unwind-protect
+          (progn
+            (magpi-test-repo-git repository "worktree" "add" linked)
+            (let ((from-main (magpi-intention--preferred-path repository "why"))
+                  (from-link (magpi-intention--preferred-path linked "why"))
+                  (key (magpi-intention--repository-key repository)))
+              (should (equal from-main from-link))
+              (should (equal key (magpi-intention--repository-key linked)))
+              (should (equal from-main
+                             (file-name-as-directory
+                              (expand-file-name
+                               "why"
+                               (expand-file-name
+                                key
+                                (expand-file-name "worktrees" home))))))
+              (should-not (string-prefix-p
+                           (file-truename repository)
+                           (file-truename from-main)))))
+        (ignore-errors (magpi-test-repo-git repository "worktree" "remove" linked))
+        (ignore-errors (delete-directory home t))
+        (ignore-errors (delete-directory link-parent t))))))
 
-(ert-deftest magpi-intention-merge-refuses-missing-worktree ()
-  "Promise: a missing worktree is not a successful merge."
-  (magpi-test-with-repo (repository "magpi-intention-merge-missing-")
-    (let ((intention (make-magpi-intention
-                      :id "gone" :objective "Gone"
-                      :source-root repository
-                      :worktree-path (expand-file-name "absent" repository)
-                      :branch "magpi/gone" :base-ref "master"
-                      :state 'active)))
-      (should-error (magpi-intention-merge-record intention) :type 'user-error)
-      (should (eq (magpi-intention-state intention) 'active)))))
+(ert-deftest magpi-intention-home-refuses-a-git-checkout ()
+  "Promise: a Magpi home inside any Git checkout is refused."
+  (magpi-test-with-repo (repository "magpi-intention-home-git-")
+    (let ((magpi-home-directory (expand-file-name "garden" repository)))
+      (should-error (magpi-intention--home) :type 'user-error)
+      (should-error (magpi-intention--preferred-path repository "why")
+                    :type 'user-error))))
+
+(ert-deftest magpi-intention-refuses-unsafe-ids-before-derived-paths ()
+  "Promise: branch and garden paths require a path-safe id."
+  (magpi-test-with-repo (repository "magpi-intention-unsafe-id-")
+    (should-not (magpi-intention-branch (make-magpi-intention :id nil)))
+    (should (equal (magpi-intention-branch (make-magpi-intention :id "why"))
+                   "magpi/why"))
+    (should (magpi-store-id-p "why"))
+    (dolist (id '("" "." ".." "../escape" "foo/bar" "foo\\bar" "~" "~root"))
+      (should-not (magpi-store-id-p id))
+      (should-error (magpi-intention--preferred-path repository id))
+      (should-error (magpi-intention-branch (make-magpi-intention :id id)))
+      (should-error (magpi-intention-create-record "Why" repository id)))))
+
+(ert-deftest magpi-intention-birth-from-any-checkout-uses-the-same-garden ()
+  "Promise: invoking checkout only supplies target-ref; garden follows the repository."
+  (magpi-test-with-repo (repository "magpi-intention-birth-link-")
+    (let* ((link-parent (make-temp-file "magpi-test-link-" t))
+           (linked (expand-file-name "linked" link-parent))
+           intention)
+      (unwind-protect
+          (progn
+            (magpi-test-repo-git repository "worktree" "add" "-b" "other" linked)
+            (setq intention (magpi-intention-create-record "Peer" linked "peer"))
+            (setq intention (magpi-intention-ensure-worktree intention linked))
+            (should (file-equal-p (magpi-intention-worktree-path intention)
+                                  (magpi-intention--preferred-path repository "peer")))
+            (should (string-match-p "refs/heads/other\\'"
+                                    (magpi-intention-target-ref intention)))
+            (should (equal "refs/heads/master"
+                           (string-trim (magpi-test-repo-git repository
+                                                            "symbolic-ref" "--quiet" "HEAD"))))
+            (should (equal "refs/heads/other"
+                           (string-trim (magpi-test-repo-git linked
+                                                            "symbolic-ref" "--quiet" "HEAD")))))
+        (ignore-errors (magpi-test-repo-git repository "worktree" "remove" linked))
+        (ignore-errors (delete-directory link-parent t))))))
+(ert-deftest magpi-intention-glance-root-routes-change-worktree-to-primary ()
+  "Promise: glance from a Magpi change checkout is the repository Magpi."
+  (magpi-test-with-repo (repository "magpi-intention-glance-root-")
+    (let* ((intention (magpi-intention-create-record "Stay outside" repository "inside"))
+           work)
+      (setq intention (magpi-intention-ensure-worktree intention)
+            work (magpi-intention-worktree-path intention))
+      (should (file-equal-p (magpi-intention-glance-root repository) repository))
+      (should (file-equal-p (magpi-intention-glance-root work) repository)))))
+
+(ert-deftest magpi-intention-glance-root-keeps-unrelated-linked-checkout ()
+  "Promise: a non-Magpi linked worktree is not a nested Magpi."
+  (magpi-test-with-repo (repository "magpi-intention-glance-peer-")
+    (let* ((link-parent (make-temp-file "magpi-test-link-" t))
+           (linked (expand-file-name "linked" link-parent)))
+      (unwind-protect
+          (progn
+            (magpi-test-repo-git repository "worktree" "add" "-b" "other" linked)
+            (should (file-equal-p (magpi-intention-glance-root linked) linked)))
+        (ignore-errors (magpi-test-repo-git repository "worktree" "remove" linked))
+        (ignore-errors (delete-directory link-parent t))))))
 
 (provide 'magpi-intention-tests)
 ;;; magpi-intention-tests.el ends here

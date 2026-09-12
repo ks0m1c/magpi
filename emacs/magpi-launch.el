@@ -1,8 +1,13 @@
-;;; magpi-launch.el --- Frozen launch: model, thinking, role, bind -*- lexical-binding: t; -*-
+;;; magpi-launch.el --- Frozen launch: model, thinking, role, source -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
 
 ;; One job: freeze a semantic launch specification and remember launch
 ;; defaults.  Catalog fill is registered by an adapter; this file does not
-;; speak Pi or Pimacs.
+;; speak Pi or Pimacs.  Launch-local source is not an Intention `@' binding.
 
 (require 'cl-lib)
 (require 'project)
@@ -10,7 +15,7 @@
 (require 'subr-x)
 
 (defgroup magpi nil
-  "Magpi: freeze launch (model, thinking, role, bind) for one action."
+  "Magpi: freeze launch (model, thinking, role, source) for one action."
   :group 'tools)
 
 (defconst magpi-launch-thinking-values
@@ -220,20 +225,20 @@ Inherit/blank does not erase a previous explicit choice."
     (_ (user-error "Unknown Magpi role label: %s" label))))
 
 (defun magpi-launch-bind-from-label (label)
-  "Translate bind-at-spawn LABEL to a semantic kind, or reject it."
+  "Translate launch-local source LABEL to a semantic kind, or reject it."
   (pcase label
     ("None" 'none)
     ("Point" 'point)
     ("Region" 'region)
-    (_ (user-error "Unknown Magpi bind label: %s" label))))
+    (_ (user-error "Unknown Magpi source label: %s" label))))
 
 (defun magpi-launch-bind-label (kind)
-  "Return the transient label for bind-at-spawn KIND."
+  "Return the transient label for launch-local source KIND."
   (pcase kind
     ('none "None")
     ('point "Point")
     ('region "Region")
-    (_ (user-error "Unknown Magpi bind kind: %S" kind))))
+    (_ (user-error "Unknown Magpi source kind: %S" kind))))
 
 (defun magpi-launch-source-buffer-p ()
   "Return non-nil when the current buffer can be frozen as file evidence.
@@ -244,7 +249,7 @@ Magpi status and Pimacs chat are porcelain, not source."
        (not (derived-mode-p 'magpi-status-mode 'pimacs-chat-mode))))
 
 (defun magpi-launch-default-bind ()
-  "Default bind-at-spawn: None unless an active region is source evidence."
+  "Default launch-local source: None unless an active region is source evidence."
   (if (and (use-region-p) (magpi-launch-source-buffer-p))
       'region
     'none))
@@ -287,10 +292,38 @@ Magpi status and Pimacs chat are porcelain, not source."
      ((eq (plist-get context :kind) 'point) "Current location")
      (t "New chat"))))
 
+(defun magpi-launch-compose-first-message (prompt context)
+  "Compose first-message text from PROMPT and launch-local CONTEXT.
+
+PROMPT is adapter/programmatic task text, or nil when the user will
+author in chat.  CONTEXT is spawn-local source (`point', `region', or
+`none'), never an Intention `@' binding.
+
+A normal spawn leaves PROMPT nil; captured source still becomes the
+first message.  Neither a blank prompt nor `none' source is sent."
+  (let* ((prompt (magpi-normalize-objective prompt))
+         (kind (plist-get context :kind))
+         (source
+          (and context
+               (not (memq kind '(none nil)))
+               (format "Context captured at dispatch:\n- %s%s%s"
+                       (or (plist-get context :file) "buffer")
+                       (if-let ((line (plist-get context :line)))
+                           (format ":%d" line)
+                         "")
+                       (if-let ((text (plist-get context :text)))
+                           (format "\n\n%s" text)
+                         "")))))
+    (cond
+     ((and prompt source) (concat prompt "\n\n" source))
+     (prompt prompt)
+     (source source))))
+
 (defun magpi-launch-build (root thinking role context &optional requested-model)
   "Resolve one immutable launch specification.
 
 ROOT, THINKING, ROLE, and CONTEXT are captured before an adapter is called.
+CONTEXT is launch-local source, not a durable `@' reference.
 THINKING is a value from `magpi-launch-thinking-values'.
 REQUESTED-MODEL is a canonical provider/model id or nil (inherit).
 Authored intent belongs exclusively to the action, not this configuration."
@@ -299,7 +332,7 @@ Authored intent belongs exclusively to the action, not this configuration."
   (unless (memq role '(reader writer))
     (user-error "Unknown Magpi role: %S" role))
   (unless (memq (plist-get context :kind) '(none point region))
-    (user-error "Unknown Magpi bind kind: %S" (plist-get context :kind)))
+    (user-error "Unknown Magpi source kind: %S" (plist-get context :kind)))
   (let ((model (magpi-normalize-model requested-model)))
     (when (and model
                (not (string-match-p "\\`[^/]+/.+\\\'" model)))

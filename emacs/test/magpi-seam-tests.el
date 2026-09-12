@@ -19,7 +19,7 @@
 ;;;; Launch menu — declarative model contract
 
 (ert-deftest magpi-seam-launch-exposes-frozen-spec-axes ()
-  "Promise: launch freezes model, thinking, role, and context.
+  "Promise: launch freezes model, thinking, role, and source.
 Role is always present as w|r (never unset, never the symbol quote)."
   (let* ((args (magpi-seams-launch-args))
          (suffix (magpi-seams-role-suffix))
@@ -271,7 +271,6 @@ Perch/Cold/intention wrappers mean a two-step ident is not the path."
          (cold (make-magpi-action :id "cold-1" :title "Cold chat" :launch launch))
          (intention (make-magpi-intention
                      :id "intent-1" :objective "Ship auth" :state 'active
-                     :worktree-path root :branch "magpi/auth"
                      :writer-lease '(:action-id "nested-1")
                      :bindings '((:kind file :reference "notes.org" :label "notes")))))
     (list intention (list nested live cold))))
@@ -388,6 +387,99 @@ Perch/Cold/intention wrappers mean a two-step ident is not the path."
                 (should (eq (magpi-facet-type) 'magpi-perch))
                 (magpi-status-jump)
                 (should (eq (magpi-facet-type) 'magpi-cold))))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+
+(ert-deftest magpi-seam-status-paint-renders-prepared-sample ()
+  "Promise: open snapshots once; event paint does not collect or sample Git."
+  (magpi-test-with-repo (root)
+    (let* ((reads 0)
+           (git 0)
+           (buffer nil)
+           (intention (make-magpi-intention
+                       :id "intent-1" :objective "Ship auth" :state 'active)))
+      (cl-letf (((symbol-function 'magpi-intention-git-facts)
+                 (lambda (_)
+                   (setq git (1+ git))
+                   '(:checkout dirty :exists t :ahead 1))))
+        (unwind-protect
+            (progn
+              (setq buffer
+                    (save-window-excursion
+                      (magpi-status-open
+                       root
+                       (lambda () nil)
+                       (lambda ()
+                         (setq reads (1+ reads))
+                         (list intention)))
+                      (current-buffer)))
+              (should (= reads 1))
+              (should (= git 1))
+              (with-current-buffer buffer
+                (magit-refresh-buffer)
+                (should (= reads 1))
+                (should (= git 1))
+                (should (string-match-p "Ship auth"
+                                        (buffer-substring-no-properties
+                                         (point-min) (point-max))))))
+          (when (buffer-live-p buffer)
+            (kill-buffer buffer)))))))
+
+(ert-deftest magpi-seam-status-resize-is-presentation ()
+  "Promise: displayed-window resize repaints without `g'; point and folds hold."
+  (magpi-test-with-repo (root)
+    (let* ((order nil)
+           (buffer nil)
+           (intention (make-magpi-intention
+                       :id "intent-1" :objective "Ship auth" :state 'active)))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (_delay _repeat fn &rest args)
+                   (apply fn args)
+                   'immediate))
+                ((symbol-function 'magpi-intention-git-facts)
+                 (lambda (_) '(:checkout dirty :exists t :ahead 1))))
+        (unwind-protect
+            (progn
+              (setq buffer
+                    (progn
+                      (magpi-status-open
+                       root
+                       (lambda () nil)
+                       (lambda () (list intention))
+                       (lambda () (push 'prepare order)))
+                      (current-buffer)))
+              (with-current-buffer buffer
+                (setq order nil)
+                (magpi-seam--goto 'magpi-intention "intent-1")
+                (let ((section (magit-current-section)))
+                  (magit-section-hide section)
+                  (should (oref section hidden)))
+                (let ((window (get-buffer-window buffer t)))
+                  (should window)
+                  (when (> (window-body-width window) 40)
+                    (set-frame-width (window-frame window) 42))
+                  (magpi-status--on-window-size-change (window-frame window))
+                  (should-not (memq 'prepare order))
+                  (should (equal (oref (magit-current-section) value) "intent-1"))
+                  (should (oref (magpi-seam--section 'magpi-intention "intent-1") hidden))
+                  (let ((heading (car (split-string
+                                       (buffer-substring-no-properties
+                                        (point-min) (point-max))
+                                       "\n"))))
+                    (should (<= (string-width heading)
+                                (window-body-width
+                                 (get-buffer-window buffer t))))))
+                (magpi-status-refresh)
+                (should (equal order '(prepare)))
+                (should (eq (lookup-key magpi-status-mode-map (kbd "n"))
+                            #'magpi-status-next-chat))
+                (should (eq (lookup-key magpi-status-mode-map (kbd "p"))
+                            #'magpi-status-previous-chat))
+                (should (eq (lookup-key magpi-status-mode-map (kbd "TAB"))
+                            #'magpi-status-toggle-section))
+                (should (eq (lookup-key magpi-status-mode-map (kbd "RET"))
+                            #'magpi-visit))))
           (when (buffer-live-p buffer)
             (kill-buffer buffer)))))))
 

@@ -118,5 +118,19 @@
     (setq buffer-file-name "/tmp/lib/auth.ex")
     (should (eq (magpi-launch-default-bind) 'none))))
 
+(ert-deftest magpi-launch-composes-first-message-from-source-without-prompt ()
+  (should-not (magpi-launch-compose-first-message nil '(:kind none)))
+  (should-not (magpi-launch-compose-first-message "  " '(:kind none)))
+  (should (equal (magpi-launch-compose-first-message "Inspect this" '(:kind none))
+                 "Inspect this"))
+  (let* ((context '(:kind point :file "lib/auth.ex" :line 12 :text "refresh()"))
+         (source-only (magpi-launch-compose-first-message nil context))
+         (combined (magpi-launch-compose-first-message "Inspect this" context)))
+    (should (string-match-p "lib/auth.ex:12" source-only))
+    (should (string-match-p "refresh()" source-only))
+    (should-not (string-match-p "Inspect this" source-only))
+    (should (string-prefix-p "Inspect this" combined))
+    (should (string-match-p "refresh()" combined))))
+
 (provide 'magpi-launch-tests)
 ;;; magpi-launch-tests.el ends here

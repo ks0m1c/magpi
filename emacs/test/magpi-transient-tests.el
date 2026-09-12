@@ -86,5 +86,27 @@
               ((symbol-function 'require) (lambda (&rest _) nil)))
       (should-error (magpi-launch-dispatch) :type 'user-error))))
 
+
+(ert-deftest magpi-launch-loaddefs-autoload-not-prefix ()
+  "Promise: loaddefs records an autoload, not the Transient prefix form.
+
+Doom evaluates magpi-autoloads.el before Transient is loaded.  A copied
+`transient-define-prefix' is void-function during `doom build'."
+  (require 'loaddefs-gen)
+  (let* ((source (find-library-name "magpi-transient"))
+         (dir (make-temp-file "magpi-loaddefs" t))
+         (out (expand-file-name "magpi-autoloads.el" dir)))
+    (unwind-protect
+        (progn
+          (copy-file source (expand-file-name "magpi-transient.el" dir))
+          (loaddefs-generate dir out)
+          (with-temp-buffer
+            (insert-file-contents out)
+            (goto-char (point-min))
+            (should (search-forward "(autoload 'magpi-launch" nil t))
+            (goto-char (point-min))
+            (should-not (search-forward "transient-define-prefix" nil t))))
+      (delete-directory dir t))))
+
 (provide 'magpi-transient-tests)
 ;;; magpi-transient-tests.el ends here

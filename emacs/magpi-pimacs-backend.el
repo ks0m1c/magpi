@@ -1,5 +1,10 @@
 ;;; magpi-pimacs-backend.el --- Pimacs adapter for Magpi -*- lexical-binding: t; -*-
 
+;; Copyright (C) 2026 ks0m1c_dharma
+;; SPDX-License-Identifier: GPL-3.0-or-later
+
+;; This file is part of Magpi.
+
 ;; One job: compile Magpi semantics to Pimacs and normalize Pimacs facts
 ;; back.  This is the only Magpi module allowed to use Pimacs private APIs.
 
@@ -411,23 +416,14 @@ A disk read stores it immediately.  Returns the cached models, if any."
                       (magpi-launch-spec-role spec)))))))
 
 (defun magpi-pimacs--initial-prompt (action)
-  "Compile ACTION's task prompt and frozen source context.
+  "Compile ACTION's task prompt and frozen launch-local source.
 
-Authority, model, and intention identity are not prompt text."
-  (when-let ((prompt (magpi-action-prompt action)))
-    (let ((context (magpi-launch-spec-context (magpi-action-launch action))))
-      (if (eq (plist-get context :kind) 'none)
-          prompt
-        (concat
-         prompt
-         (format "\n\nContext captured at dispatch:\n- %s%s%s"
-                 (or (plist-get context :file) "buffer")
-                 (if-let ((line (plist-get context :line)))
-                     (format ":%d" line)
-                   "")
-                 (if-let ((text (plist-get context :text)))
-                     (format "\n\n%s" text)
-                   "")))))))
+Authority, model, intention identity, and `@' bindings are not prompt text.
+A nil task prompt still delivers captured point/region source."
+  (magpi-launch-compose-first-message
+   (magpi-action-prompt action)
+   (when-let ((launch (magpi-action-launch action)))
+     (magpi-launch-spec-context launch))))
 
 (defun magpi-pimacs--content-text (content)
   "Extract assistant text from Pimacs's transport CONTENT."

@@ -1,0 +1,207 @@
+#+TITLE: Search — a cut across traversal, after traversal
+#+STATUS: hold
+#+FILETAGS: :magpi:traversal:search:
+
+Settled grammar is [[file:../MAGPI.org][MAGPI.org]]. Do not begin this until Gate 5
+passes (=entries=, Head, =t=, ReturnAddress). Gate 4 is still the next
+build. This file holds the fight; it is not MAGPI.org.
+
+Pimacs =C-r= stays this-chat recall. Magit =l= stays Git history.
+
+* Proposition
+
+Search keeps the why beside *older words* the way glance keeps it beside
+*present* doing. It is not a home, not a chat client, not an activity
+feed, not a transcript store.
+
+If a row cannot name its Intention (or standalone Action), it is not Magpi.
+
+* Priors (do not relitigate)
+
+- Magpi mints Intention, Action, Ask. Entry is borrowed. Prompt text is
+  never identity.
+- Traversal is a session-local projection. =t= does not spawn or attach.
+  Cold Action: durable coordinates only; turns need explicit =RET= attach.
+- Magpi core never opens Pi JSONL. The Pimacs adapter may parse privately
+  behind a normalized Entry snapshot.
+- Git tells Git facts. =target-ref= / =genesis-oid= / =spawn-oid= are
+  coordinates; the branch *name* is live =symbolic-ref=.
+- One store per =git-common-dir=. No fleet. No Magpi transcript.
+- Transient is discoverability. Glance and traversal buffers have no HUD.
+- STRUCTURE: do not extract a generic UI module until traversal exists as
+  the first native Magit-section surface. Search is the *second* surface
+  that may reuse that seam — not a reason to extract it early.
+- Launch Transient does not persist. Search args do not persist.
+
+* Jobs (two doors, do not fuse)
+
+Classic behaviour, vetted against Magit and Pimacs:
+
+| Job | Pattern | Magpi door | Not |
+|-----+---------+------------+-----|
+| Find which doing said it | Magit =l=, then visit | Browse buffer, =RET= owner | Filter glance |
+| Reuse a sentence in the prompt I am typing | Pimacs =C-r= | Optional insert suffix | Steal Pimacs =C-r= |
+
+Scan wants a list with a why. Yank wants a minibuffer. One Transient, two
+suffixes. The buffer is for scan.
+
+Show the list first, then refine (=C-s=, optional =--grep=). Do not
+interrogate before painting — Magit log, not a search engine splash.
+
+Default scope is *this branch* when HEAD is attached; otherwise this
+repository. Widen explicitly. Never default to other repositories.
+
+=q= is =quit-window=. Search must not become the perch.
+
+* [⊗] Polarities (hold)
+
+1. *Query without process vs traversal's cold rule.*
+   =t= must not fill turns when cold (no pretend process). Search is
+   =magit-log=: read the object store without checking out each commit.
+   Classified: *problem if search attaches*; *false frame if search
+   therefore cannot see cold turns*. Cold adapter query by Action id is
+   query, not effect.
+
+2. *This repo vs all Magpi.*
+   The store already *is* the repository. Magit =l a= is all branches in
+   *this* repo, not every clone on the machine. Classified: *false frame*.
+   Fleet is deliberately absent. =r= = all Actions in this
+   =git-common-dir= (including =merged= / =discarded=). =b= = Git cut.
+   Orphan Pimacs chats (no Action file) stay Pimacs =/resume=.
+
+3. *Attached-only entries vs useful grep.*
+   MAGPI.org Query says entries while attached. That protects core from
+   JSONL and =t= from spawn. It is too weak for log. After traversal
+   proves the Entry schema, Query may add cold adapter snapshot by Action
+   id. Same schema. Unavailable stays a gap.
+
+* Model (no new being)
+
+#+begin_example
+Filter     (scope, grep?)           ; this Emacs, Transient args, theatre
+Owner      Intention | standalone Action
+Node       TraversalNode kind=turn  ; Entry id, role=user, summary
+#+end_example
+
+No SearchHit id. Do not unique by text. Duplicate sentences in two Actions
+are two Nodes. Do not hash summaries.
+
+*Scope*
+
+Standing checkout supplies live =symbolic-ref HEAD= and =HEAD= oid.
+Detached HEAD: =b= vacant (same as intention birth).
+
+| Switch | Magit analogue | Members |
+|--------+----------------+---------|
+| =b= | =l l= current | Intention: =target-ref= is this attached HEAD, *or* live change ref is this HEAD (=magpi/<id>=). Standalone: =spawn-oid= is ancestor of this =HEAD=. |
+| =r= | =l a= all | Every Action in this store, any state. |
+
+=genesis-oid= does not name the branch. On =b=, skip an Intention whose
+genesis is missing as an object or no longer an ancestor of the change
+=HEAD= — same honesty as =work-range=. Do not backfill from a moving tip.
+
+=spawn-oid= ancestor is wide (any later line that still contains that
+commit). That is Git-true. Do not invent a persisted spawn-ref to narrow
+it.
+
+*Adapter*
+
+Reuse Entry:
+
+#+begin_example
+(:status ok :generation G :action-id A :session-id S :complete BOOL
+ :entries (ENTRY...))
+ENTRY = (:id ID :parent-id ID? :role user|assistant :at TIME?
+         :summary TEXT :body VALUE? :complete BOOL)
+#+end_example
+
+Search paints =:role user= landmarks. It does not compute Head.
+
+After Gate 5, one extra adapter ask (not a Magpi record): snapshot by
+Action id without a handle. Adapter-private parse. Magpi core still never
+opens JSONL. Truncation sets =:complete= false. Cap in the adapter; do
+not build an index Magpi owns.
+
+Live handle: prefer attached =entries= (same generation rule). Cold: the
+new ask. Never spawn, never =send-initial=, never reconcile as a side
+effect of search.
+
+* Surface
+
+Transient prefix (not =magpi-transient.el=; that file's job is launch).
+Live beside traversal, e.g. =magpi-traversal-search=.
+
+#+begin_example
+C-c m r
+  b  this branch          ; default when HEAD attached
+  r  this repository
+  g  --grep=              ; optional; substring on summary
+  RET / l  paint
+  I        insert         ; inapt without a current Pimacs prompt
+#+end_example
+
+Ephemeral Magit-section buffer. Newest-first *among owners* (recall).
+Inside one Action, keep source order (ancestry). Do not invent parentage
+across Actions.
+
+#+begin_example
+Intention why
+  Action
+    user summary          ; folded landmark
+    user summary
+standalone title
+  user summary
+#+end_example
+
+Every owner heading is why or standalone title — never a bare prompt.
+Missing entries: the Action heading remains; a quiet gap, not a fake turn.
+=TAB= unfolds one body when the snapshot carried it. =n=/=p= sections.
+=RET= visits owner (chat if live; else existing attach effect — operator
+chose). =t= is still subject traversal. =g= requeries. =q= =quit-window=.
+No legend, no perch, no status squeeze.
+
+Insert (=I=): copy that summary into the current chat's prompt widget.
+If none, inapt. Kill-ring is enough when inapt.
+
+* Assumptions questioned
+
+- *“Three scopes.”* Only two Magpi cuts (=b=, =r=). A machine-wide third
+  is fleet. A Pi-orphan third is Pimacs.
+- *“Filter glance.”* Glance identity is beings. Prompt text is not a seat.
+- *“Completing-read is leaner.”* For yank, yes (=I= or Pimacs =C-r=). For
+  “which doing,” a why-grouped list is the Magpi expressiveness.
+- *“Search needs a store.”* Pi already stored the turns. Magpi stores
+  Action ids. Join them at query time.
+- *“Must wait for attach.”* Attach is process. Log does not checkout.
+- *“Default repo-wide.”* Too noisy; trains search-as-home. Default =b=.
+- *“Merged work is dead.”* Merged why is the *most* reusable wording.
+  =r= includes terminal state; glance Perch need not.
+
+* Agility
+
+Forward motion stays: glance → spawn → Magit → React. Search is a side
+door for memory, like =l=. Keys already taken stay taken (=t=, =g=,
+Pimacs =C-r=).
+
+Changing Git (checkout another branch) plus =g= is the filter changing.
+No Magpi field to migrate. No search file in =.git/magpi=.
+
+If Gate 6 never sees wrong-target “where did I say that,” do not build
+this. Friction first.
+
+* Checks (when Gate 5 exists)
+
+- Fake adapter snapshots; =C-c m r= does not spawn, attach, or write.
+- =b= on a named branch matches =target-ref= / =magpi/<id>= / ancestor
+  =spawn-oid=; detached HEAD inapt.
+- =r= lists a =merged= Intention's user turns.
+- Orphan jsonl without an Action file is absent.
+- =RET= on cold is the existing attach; search itself stays query.
+- =q= restores the previous window.
+- Core tests never open JSONL.
+
+* Not this file
+
+Implement. Amend MAGPI.org. A =magpi-search.el= being. Catalog peek as
+history. =entries= generation used as Head. Fork. Grep of assistant
+bodies as first paint.
