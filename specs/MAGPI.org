@@ -200,7 +200,7 @@ whether those identities still exist.
 
 | Effect | Does | Never |
 |--------+------+-------|
-| birth | persist kernel, then spawn; =send-initial= once | reuse an id |
+| birth | persist kernel, then spawn; =send-initial= once | reuse an id; visit chat |
 | ensure-process | live → visit; dead/absent → attach, no =send-initial= | new id, rebake Action |
 | reduce+replace | =magpi-action-reduce=, then =puthash= | write the Action file |
 | bind / lease / state | copy intention, append audit, save | |
@@ -417,7 +417,7 @@ their intention.
 | =i= | Create an intention |
 | =@= | Bind context to the surface at point |
 | =C-c m i= / =C-c m @= | Create or bind outside status |
-| =s= | Spawn an action; keep the intention at point |
+| =s= | Spawn an action; keep the intention at point; do not visit chat |
 | =RET= | Intention → Magit; action → chat; ask → React |
 | =v= | Exclusive writer occupies source with =magpi/<id>=; else garden worktree |
 | =b= | Peek another Magpi branch; does not check it out. =g= restores HEAD |
@@ -791,9 +791,10 @@ Pi session folders keyed by cwd are not Git identity and Magpi does not migrate 
 Membership: =Action.intention-id= is the join. Status and Magit metadata
 index RAM Actions; Intention files do not store =action-ids=.
 Pimacs owns the chat buffer: killing it kills the agent. Magpi does not
-keep a process without that buffer. Spawn in a Magpi-inside-Pi Emacs
-drops parent =PI_SESSION_*= so the child cannot inherit the operator
-session.
+keep a process without that buffer. Magpi-spawned chats and glance are ordinary
+project buffers: visible, cycled with the checkout. Kill remains discard.
+Spawn in a Magpi-inside-Pi Emacs drops parent =PI_SESSION_*= so the child
+cannot inherit the operator session.
 
 States: =active=, =merged=, =discarded=. State records the disposition of the
 Intention, not current Git topology. Richer states only with a user operation that needs them.

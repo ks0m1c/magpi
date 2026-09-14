@@ -384,7 +384,8 @@
     (magpi-status-mode)
     (should-not truncate-lines)
     (should-not truncate-partial-width-windows)
-    (should word-wrap)))
+    (should word-wrap)
+    (should (buffer-local-value 'doom-real-buffer-p (current-buffer)))))
 (ert-deftest magpi-status-heading-seats-are-named-not-a-bag ()
   (let* ((action (make-magpi-action
                   :id "action-1"

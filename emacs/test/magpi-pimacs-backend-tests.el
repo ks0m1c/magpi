@@ -22,9 +22,10 @@
     (setq magpi-pimacs-test--name name)
     (setq magpi-pimacs-test--flags pimacs-flags)
     (setq magpi-pimacs-test--chat (get-buffer-create " *magpi-pimacs-test*"))
-    (switch-to-buffer magpi-pimacs-test--chat)
-    (setq-local pimacs--project-key "test-project")
-    (puthash "test-project" t pimacs--agents))
+    (with-current-buffer magpi-pimacs-test--chat
+      (setq-local pimacs--project-key "test-project"))
+    (puthash "test-project" t pimacs--agents)
+    (pop-to-buffer magpi-pimacs-test--chat))
   (defun pimacs--current-agent () t)
   (defun pimacs--set-event-listener (_name _id listener)
     (setq magpi-pimacs-test--listener listener))
@@ -398,6 +399,31 @@
                             (magpi-pimacs-test-action) #'ignore))
      (should-not seen-id)
      (should-not seen-file))))
+
+
+(ert-deftest magpi-pimacs-visible-buffer-name-strips-only-a-leading-space ()
+  (should (equal (magpi-pimacs--visible-buffer-name " *chat*") "*chat*"))
+  (should (equal (magpi-pimacs--visible-buffer-name "*chat*") "*chat*"))
+  (should (equal (magpi-pimacs--visible-buffer-name nil) nil)))
+(ert-deftest magpi-pimacs-spawned-chat-is-a-real-project-buffer ()
+  (magpi-pimacs-test-with-backend
+   (let* ((handle (magpi-backend-spawn (make-magpi-pimacs-backend)
+                                       (magpi-pimacs-test-action)
+                                       #'ignore))
+          (chat (magpi-pimacs-handle-chat-buffer handle)))
+     (should (buffer-live-p chat))
+     (should-not (string-prefix-p " " (buffer-name chat)))
+     (should (buffer-local-value 'doom-real-buffer-p chat)))))
+
+(ert-deftest magpi-pimacs-spawn-does-not-visit-chat ()
+  (magpi-pimacs-test-with-backend
+   (let ((origin (current-buffer)))
+     (magpi-backend-spawn (make-magpi-pimacs-backend)
+                          (magpi-pimacs-test-action)
+                          #'ignore)
+     (should (eq (current-buffer) origin))
+     (should (buffer-live-p magpi-pimacs-test--chat))
+     (should-not (eq (current-buffer) magpi-pimacs-test--chat)))))
 (ert-deftest magpi-pimacs-backend-visit-rebinds-a-killed-chat ()
   (magpi-pimacs-test-with-backend
    (let* ((backend (make-magpi-pimacs-backend))
@@ -410,7 +436,10 @@
          (progn
            (magpi-backend-visit backend handle)
            (should (buffer-live-p (magpi-pimacs-handle-chat-buffer handle)))
-           (should (equal magpi-pimacs-test--name "Agent · action-1234")))
+           (should (equal magpi-pimacs-test--name "Agent · action-1234"))
+           (should-not (string-prefix-p " " (buffer-name (magpi-pimacs-handle-chat-buffer handle))))
+           (should (buffer-local-value 'doom-real-buffer-p
+                                      (magpi-pimacs-handle-chat-buffer handle))))
        (magpi-pimacs--history-watch-stop handle)))))
 
 (ert-deftest magpi-pimacs-backend-visit-pulls-session-history ()

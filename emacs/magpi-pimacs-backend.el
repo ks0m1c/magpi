@@ -572,6 +572,34 @@ A Magpi-spawned agent must not inherit the operator's Pi session."
       entry))
    env))
 
+(defun magpi-pimacs--visible-buffer-name (name)
+  "Return NAME without a leading-space hide, or NAME."
+  (if (and (stringp name) (string-prefix-p " " name))
+      (substring name 1)
+    name))
+
+(defun magpi-pimacs--as-project-buffer (buffer)
+  "Make BUFFER a visible project buffer.  Kill still terminates the agent."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let ((visible (magpi-pimacs--visible-buffer-name (buffer-name))))
+        (unless (string= visible (buffer-name))
+          (rename-buffer visible t)))
+      (setq-local doom-real-buffer-p t)))
+  buffer)
+
+(defun magpi-pimacs--ensure-chat (name root)
+  "Return Pimacs chat NAME at ROOT without displaying it.
+
+`pimacs-chat' visits via `pop-to-buffer'.  Spawn is birth, not visit."
+  (let (chat)
+    (cl-letf (((symbol-function 'pop-to-buffer)
+               (lambda (buffer &rest _)
+                 (setq chat buffer)
+                 buffer)))
+      (pimacs-chat name root))
+    (magpi-pimacs--as-project-buffer (or chat (current-buffer)))))
+
 (cl-defmethod magpi-backend-spawn ((_backend magpi-pimacs-backend) action listener)
   (let* ((spec (magpi-action-launch action))
          (root (magpi-launch-spec-root spec))
@@ -579,24 +607,23 @@ A Magpi-spawned agent must not inherit the operator's Pi session."
          (process-environment (magpi-pimacs--without-parent-session process-environment))
          (pimacs-flags (append (magpi-pimacs--without-option pimacs-flags "--session-id")
                                (list "--session-id" (magpi-action-id action))
-                               (magpi-pimacs--flags spec))))
-    (pimacs-chat session-name root)
-    (let* ((chat (current-buffer))
-           (handle (make-magpi-pimacs-handle
-                    :id (magpi-action-id action)
-                    :chat-buffer chat
-                    :initial-title session-name
-                    :listener listener
-                    :root root
-                    :key (buffer-local-value 'pimacs--project-key chat))))
-      (with-current-buffer chat
-        (magpi-pimacs--listen handle listener)
-        (when-let ((agent (pimacs--current-agent)))
-          (let ((cleanup (lambda ()
-                           (funcall listener '(:type disconnected)))))
-            (setf (magpi-pimacs-handle-cleanup handle) cleanup)
-            (pimacs--agent-add-cleanup agent cleanup))))
-      handle)))
+                               (magpi-pimacs--flags spec)))
+         (chat (magpi-pimacs--ensure-chat session-name root))
+         (handle (make-magpi-pimacs-handle
+                  :id (magpi-action-id action)
+                  :chat-buffer chat
+                  :initial-title session-name
+                  :listener listener
+                  :root root
+                  :key (buffer-local-value 'pimacs--project-key chat))))
+    (with-current-buffer chat
+      (magpi-pimacs--listen handle listener)
+      (when-let ((agent (pimacs--current-agent)))
+        (let ((cleanup (lambda ()
+                         (funcall listener '(:type disconnected)))))
+          (setf (magpi-pimacs-handle-cleanup handle) cleanup)
+          (pimacs--agent-add-cleanup agent cleanup))))
+    handle))
 
 (cl-defmethod magpi-backend-send-initial ((_backend magpi-pimacs-backend) handle action)
   (unless (magpi-pimacs-handle-initial-sent handle)
@@ -722,16 +749,15 @@ Glance may show loading until the porcelain is still."
         (unless (and name root)
           (user-error "Attempt %s has no live chat buffer"
                       (magpi-pimacs-handle-id handle)))
-        ;; Agent may still be live.  pimacs-chat reuses it and rebuilds the UI;
-        ;; flags do not apply.
-        (pimacs-chat name root)
-        (setq chat (current-buffer))
+        ;; Agent may still be live.  Ensure rebuilds the UI; flags do not apply.
+        (setq chat (magpi-pimacs--ensure-chat name root))
         (setf (magpi-pimacs-handle-chat-buffer handle) chat
               (magpi-pimacs-handle-key handle)
               (buffer-local-value 'pimacs--project-key chat))
         (when-let ((listener (magpi-pimacs-handle-listener handle)))
           (with-current-buffer chat
             (magpi-pimacs--listen handle listener)))))
+    (magpi-pimacs--as-project-buffer chat)
     (magpi-pimacs--hydrate-history chat handle)
     (pop-to-buffer chat)))
 

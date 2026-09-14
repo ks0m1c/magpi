@@ -2180,6 +2180,7 @@ Colour, Unicode, and motion restate these marks; they do not replace them."
   (setq-local truncate-lines nil)
   (setq-local truncate-partial-width-windows nil)
   (setq-local word-wrap t)
+  (setq-local doom-real-buffer-p t)
   ;; Magpi uses Magit's section machinery, but is not a Forge buffer, keep it lazy
   (dolist (hook '(forge-set-buffer-repository forge-bug-reference-setup))
     (setq-local magit-mode-hook
