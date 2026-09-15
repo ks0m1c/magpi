@@ -24,6 +24,7 @@
 (autoload 'magpi-discard "magpi" nil t)
 (autoload 'magpi-visit "magpi" nil t)
 (autoload 'magpi-visit-worktree "magpi" nil t)
+(autoload 'magpi-open "magpi" nil t)
 (autoload 'magpi-intention-create "magpi" nil t)
 (autoload 'magpi-changes-status "magpi" nil t)
 (autoload 'magpi-changes-diff "magpi" nil t)
@@ -2147,6 +2148,7 @@ One debounce; every visible Magpi status buffer is painted."
   :parent special-mode-map
   "RET" #'magpi-visit
   "v" #'magpi-visit-worktree
+  "o" #'magpi-open
   "b" #'magpi-status-branch
   "TAB" #'magpi-status-toggle-section
   "C-i" #'magpi-status-toggle-section

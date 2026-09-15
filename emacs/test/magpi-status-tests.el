@@ -1134,6 +1134,8 @@
               #'magpi-visit))
   (should (eq (lookup-key magpi-status-mode-map (kbd "v"))
               #'magpi-visit-worktree))
+  (should (eq (lookup-key magpi-status-mode-map (kbd "o"))
+              #'magpi-open))
   (should (eq (lookup-key magpi-status-mode-map (kbd "b"))
               #'magpi-status-branch))
   (should (eq (lookup-key magpi-status-mode-map (kbd "j"))

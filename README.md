@@ -30,6 +30,7 @@ Magpi holds the why beside Pi's doing and Git's evidence. Tiny Emacs porcelain o
 | | `g` | reconcile and repaint |
 | judge | `RET` | intention → Magit; action → chat; ask → React |
 | | `v` | live writer → garden; idle exclusive writer occupies source |
+| | `o` | prefix: `o v` visit, `o o` shell, `o .` find file |
 | | `a` | React |
 | | `k` | discard chat / action / intention / worktree at point |
 | depth | `m` `d` `l` `c` | Magit status, diff, log, commit |

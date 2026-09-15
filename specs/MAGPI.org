@@ -419,7 +419,9 @@ their intention.
 | =C-c m i= / =C-c m @= | Create or bind outside status |
 | =s= | Spawn an action; keep the intention at point; do not visit chat |
 | =RET= | Intention → Magit; action → chat; ask → React |
-| =v= | Exclusive writer occupies source with =magpi/<id>=; else garden worktree |
+| =v= | Toggle standing on the live change (garden) vs source. Exclusive writer occupies source with =magpi/<id>=; else visit. =o= follows standing |
+| =o= | Prefix: open standing. =o v= visit, =o o= shell, =o .= find file. Never checks out a branch |
+| =C-c m o= | Same prefix outside status |
 | =b= | Peek another Magpi branch; does not check it out. =g= restores HEAD |
 | =TAB= | Fold |
 | =j= | Perch ↔ Cold |

@@ -103,8 +103,9 @@ load merely to discover root or absence of intention."
 (defvar magpi--intentions (make-hash-table :test #'equal)
   "Latest persisted intention record by intention ID.")
 
-(defvar magpi--worktree-jump nil
-  "Last worktree jump: (INTENTION-ID . work) or (INTENTION-ID . source).")
+(defvar magpi--standing nil
+  "Emacs orientation for one intention: (INTENTION-ID . work) or
+(INTENTION-ID . source).  Theatre only.  `v' toggles it; `o' reads it.")
 (defvar-local magpi-intention-metadata nil
   "Intention metadata handed to Magit: id, objective, lease, audit, chat refs.")
 
@@ -157,12 +158,13 @@ Unseen actions are omitted; status appends them in display order."
 
 ;;;###autoload
 (defvar-keymap magpi-command-map
-  :doc "Global Magpi prefix: status, bind, spawn, worktree, and discard.  Extra I/R/M stay out."
+  :doc "Global Magpi prefix: status, bind, spawn, worktree, open, and discard.  Extra I/R/M stay out."
   "m" #'magpi-status
   "s" #'magpi-spawn
   "i" #'magpi-intention-create
   "@" #'magpi-bind
   "v" #'magpi-visit-worktree
+  "o" #'magpi-open
   "k" #'magpi-discard)
 
 ;;;###autoload
@@ -1595,8 +1597,8 @@ Without the lease, visit the linked worktree directory.  Magit remains RET / m."
          (garden (and lease work (not (magpi--directory-in-p work source))))
          (garden-dirty (and garden (not (magpi--checkout-clean-p work))))
          (garden-here (and garden (magpi--directory-in-p here work)))
-         (prev (and (equal id (car-safe magpi--worktree-jump))
-                    (cdr magpi--worktree-jump)))
+         (prev (and (equal id (car-safe magpi--standing))
+                    (cdr magpi--standing)))
          (holds (and head branch (magpi-intention--refs-same-p head branch)))
          (on-target (or (null target)
                         (and head (magpi-intention--refs-same-p head target))))
@@ -1634,6 +1636,34 @@ Without the lease, visit the linked worktree directory.  Magit remains RET / m."
                           :error (format "Source checkout is on %s, not %s" head target))))
      (t (append state '(:action occupy))))))
 
+(defun magpi--orient (directory)
+  "This buffer follows Magpi standing DIRECTORY.  Does not change Git HEAD."
+  (when directory
+    (let ((directory (file-name-as-directory (expand-file-name directory))))
+      (setq-local project-current-directory-override directory)
+      (when (boundp 'projectile-project-root)
+        (setq-local projectile-project-root directory)))))
+
+(defun magpi--stand (id side directory)
+  "Toggle Emacs onto SIDE of intention ID at DIRECTORY.  No Git checkout."
+  (setq magpi--standing (cons id side))
+  (dired directory)
+  (magpi--orient directory))
+
+(defun magpi--standing-directory (intention)
+  "Directory `v' last chose for INTENTION, or the live change.
+Requires a live worktree.  Never manufactures one or switches a branch."
+  (let ((work (magpi-intention-worktree-path intention)))
+    (unless work
+      (user-error "Start an action before opening this intention's checkout"))
+    (let* ((id (magpi-intention-id intention))
+           (side (and (equal id (car-safe magpi--standing))
+                      (cdr magpi--standing)))
+           (source (magpi-intention-source-root intention))
+           (work (file-name-as-directory (file-truename work)))
+           (source (and source (file-name-as-directory (file-truename source)))))
+      (if (eq side 'source) source work))))
+
 (defun magpi--visit-worktree-apply (state)
   "Run STATE's visit action, or fail.  Query already decided."
   (let ((intention (plist-get state :intention))
@@ -1643,27 +1673,98 @@ Without the lease, visit the linked worktree directory.  Magit remains RET / m."
       ('blocked
        (user-error "%s" (plist-get state :error)))
       ('open-source
-       (setq magpi--worktree-jump (cons id 'source))
-       (dired source))
+       (magpi--stand id 'source source))
       ('open-worktree
        (setq intention (magpi-intention-ensure-worktree intention (magpi--root)))
        (puthash id intention magpi--intentions)
-       (setq magpi--worktree-jump (cons id 'work))
-       (dired (file-name-as-directory
-               (file-truename
-                (or (magpi-intention-worktree-path intention)
-                    (user-error "This intention has no live checkout"))))))
+       (magpi--stand
+        id 'work
+        (file-name-as-directory
+         (file-truename
+          (or (magpi-intention-worktree-path intention)
+              (user-error "This intention has no live checkout"))))))
       ('occupy
        (magpi--visit-worktree-claim intention source)
-       (setq magpi--worktree-jump (cons id 'work))
        (magpi--paint-glance)
-       (dired source))
+       (magpi--stand id 'work source))
       ('restore
        (magpi--visit-worktree-release intention source)
-       (setq magpi--worktree-jump (cons id 'source))
        (magpi--paint-glance)
-       (dired source))
+       (magpi--stand id 'source source))
       (_ (user-error "Nothing to visit at point")))))
+
+(defun magpi--change-checkout (&optional section)
+  "Return the live change directory at point.
+Never manufactures a checkout or switches a branch."
+  (let* ((intention-id (or (magpi--section-intention-id section)
+                           (magpi--intention-id-holding-checkout default-directory)))
+         (intention (and intention-id (ignore-errors (magpi--intention intention-id)))))
+    (cond
+     (intention
+      (magpi--standing-directory intention))
+     ((magpi--section-action-id section)
+      (let ((action (magpi--action (magpi--section-action-id section))))
+        (if (magpi-action-intention-id action)
+            (magpi--standing-directory
+             (or (ignore-errors (magpi--intention (magpi-action-intention-id action)))
+                 (user-error "This action has no live intention checkout")))
+          (file-name-as-directory
+           (file-truename
+            (or (magpi--action-root action)
+                (user-error "This action has no repository locator")))))))
+     (t
+      (user-error "Stand on an intention to open its checkout")))))
+
+(defun magpi--shell-buffer-name (directory)
+  (format "*magpi:o:%s*"
+          (directory-file-name (file-truename directory))))
+
+(defun magpi--open-shell (directory)
+  "Open or reuse a shell whose default-directory is DIRECTORY."
+  (let* ((directory (file-name-as-directory (file-truename directory)))
+         (name (magpi--shell-buffer-name directory))
+         (buffer (get-buffer name)))
+    (if (buffer-live-p buffer)
+        (pop-to-buffer buffer)
+      (let ((default-directory directory))
+        (cond
+         ((fboundp 'vterm)
+          (let ((vterm-buffer-name name))
+            (vterm)))
+         (t
+          (shell name))))
+      (magpi--orient directory))))
+
+;;;###autoload
+(defun magpi-shell (&optional section)
+  "Open a shell in the live change checkout at point.
+Never checks out a branch."
+  (interactive)
+  (magpi--open-shell (magpi--change-checkout section)))
+
+;;;###autoload
+(defun magpi-find-file (&optional section)
+  "Find a file in the live change checkout at point.
+Never checks out a branch."
+  (interactive)
+  (let* ((directory (magpi--change-checkout section))
+         (default-directory directory)
+         (project-current-directory-override directory)
+         (file (read-file-name "Find file: " directory nil nil)))
+    (find-file file)
+    (when (file-in-directory-p (expand-file-name file) directory)
+      (magpi--orient directory))))
+
+(defvar-keymap magpi-open-map
+  :doc "Open the live change checkout.  Never checks out a branch."
+  "v" #'magpi-visit-worktree
+  "o" #'magpi-shell
+  "." #'magpi-find-file)
+
+(fset 'magpi-open magpi-open-map)
+(put 'magpi-open 'function-documentation
+     "Open the live change checkout.
+Prefix: v visit, o shell, . find-file.  Never checks out a branch.")
 
 (defun magpi--checkout-clean-p (directory)
   "Return non-nil when DIRECTORY has no tracked uncommitted change.
